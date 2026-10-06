@@ -1,0 +1,22 @@
+{
+  "batch": 5,
+  "findings": [
+    "A16",
+    "A17",
+    "A23",
+    "A24"
+  ],
+  "passed": 103,
+  "skipped": [],
+  "checks": [
+    "422 handlers distinguish application, FastAPI and Pydantic errors",
+    "SQL constraints, vendor errors and debug tracebacks stay out of responses",
+    "chat errors return 502/504 and are not saved as assistant turns",
+    "message-count sort precedes pagination with two listing queries",
+    "trash blocks reads, updates and inserts; message pages are bounded",
+    "transcript deadlines cover the whole request and sockets",
+    "concurrent ingestion and retrieval share one local encoder",
+    "real Chroma storage emits no PostHog capture calls"
+  ],
+  "external_services": "live YouTube/Hugging Face/Groq calls not run; transport/model boundaries tested deterministically"
+}

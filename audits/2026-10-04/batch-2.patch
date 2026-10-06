@@ -1,0 +1,1351 @@
+diff --git a/alembic.ini b/alembic.ini
+index da24487..458844b 100644
+--- a/alembic.ini
++++ b/alembic.ini
+@@ -2,4 +2,4 @@
+ script_location = %(here)s/backend/alembic
+ prepend_sys_path = %(here)s/backend
+ path_separator = os
+-sqlalchemy.url = postgresql+asyncpg://docpro:docpro@postgres:5432/docpro
++# Resolved through app.config.settings, unless explicitly overridden by a caller.
+diff --git a/audits/2026-10-04/verify_findings.py b/audits/2026-10-04/verify_findings.py
+index 5275c64..407bc94 100644
+--- a/audits/2026-10-04/verify_findings.py
++++ b/audits/2026-10-04/verify_findings.py
+@@ -1,8 +1,8 @@
+ """Positive remediation checks, with explicit opt-in historical defect probes.
+ 
+-Run: .venv/bin/python audits/2026-10-04/verify_findings.py --batch 1
+-The default checks A02/A25. Other findings remain pending their execution batch.
+-Use --baseline only to reproduce the original defects in disposable storage.
++Run: ragfusion_env/bin/python audits/2026-10-04/verify_findings.py --batch 2
++The default checks Batch 2; --batch 1 checks A02/A25 independently.
++Use --baseline for mixed regression/remaining-defect probes in disposable storage.
+ """
+ import argparse
+ import importlib.metadata
+@@ -119,9 +119,33 @@ raise SystemExit(pytest.main(["--collect-only", "-q", "tests"]))
+     print(json.dumps(evidence, indent=2))
+ 
+ 
++def verify_batch_two():
++    """Run positive storage/transaction/migration assertions and record skips."""
++    from xml.etree import ElementTree
++
++    environment = os.environ.copy()
++    environment.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
++    with tempfile.TemporaryDirectory(prefix="ragfusion-batch2-results-") as directory:
++        report = Path(directory) / "results.xml"
++        subprocess.run([
++            sys.executable, "-m", "pytest", "-q", "backend/tests/test_batch2_integrity.py",
++            f"--junitxml={report}",
++        ], cwd=ROOT, env=environment, check=True)
++        cases = ElementTree.parse(report).findall(".//testcase")
++        skipped = [case.attrib["name"] for case in cases if case.find("skipped") is not None]
++    evidence = {
++        "batch": 2, "findings": ["A01", "A03", "A04", "A10", "A28"],
++        "passed": len(cases) - len(skipped), "skipped": skipped,
++        "postgresql": "tested" if os.environ.get("BATCH2_POSTGRES_URL") else "not tested: set BATCH2_POSTGRES_URL",
++        "scope": "SQL storage integrity; vector failure/readiness behavior remains Batch 4",
++    }
++    Path(__file__).with_name("batch-2-verification.json").write_text(json.dumps(evidence, indent=2) + "\n")
++    print(json.dumps(evidence, indent=2))
++
++
+ parser = argparse.ArgumentParser(description=__doc__)
+ mode = parser.add_mutually_exclusive_group()
+-mode.add_argument("--batch", type=int, choices=[1], help="Verify completed remediation batch")
++mode.add_argument("--batch", type=int, choices=[1, 2], help="Verify a remediation batch (default: 2)")
+ mode.add_argument("--baseline", action="store_true", help="Reproduce historical, unfixed defects")
+ parser.add_argument("--source-only", action="store_true",
+                     help="Check source tracking and declarations only; does not validate installed dependencies")
+@@ -129,7 +153,12 @@ arguments = parser.parse_args()
+ if arguments.baseline and arguments.source_only:
+     parser.error("--source-only cannot be used with --baseline")
+ if not arguments.baseline:
+-    verify_batch_one(source_only=arguments.source_only)
++    if arguments.source_only and arguments.batch == 2:
++        parser.error("--source-only applies only to Batch 1")
++    if arguments.batch == 1 or arguments.source_only:
++        verify_batch_one(source_only=arguments.source_only)
++    else:
++        verify_batch_two()
+     raise SystemExit(0)
+ 
+ sys.path.insert(0, str(ROOT / "backend"))
+@@ -167,8 +196,8 @@ def record(name, evidence):
+ 
+ async def run(temp):
+     converted = to_async_database_url("postgresql://audit_user:synthetic-password@localhost/audit")
+-    assert make_url(converted).password == "***"
+-    record("database_password_corruption", "Synthetic password becomes literal ***")
++    assert make_url(converted).password == "synthetic-password"
++    record("database_password_preserved", "Synthetic password survives URL conversion")
+ 
+     app = create_app()
+     middleware = [m.cls.__name__ for m in app.user_middleware]
+@@ -190,8 +219,10 @@ async def run(temp):
+     upload_root = temp / "uploads-root"
+     with patch.object(documents, "get_settings", return_value=SimpleNamespace(upload_dir=str(upload_root))), patch.object(documents, "get_session_factory", return_value=factory):
+         doc = await documents.upload_document(b"harmless audit marker", "../../../../outside.txt", "text/plain", user_id)
+-        assert (temp / "outside.txt").read_bytes() == b"harmless audit marker"
+-        record("upload_path_traversal", "Actual service wrote outside configured upload root; only a disposable marker was written")
++        assert not (temp / "outside.txt").exists()
++        assert doc.storage_key == f"uploads/{user_id}/{doc.id}/content"
++        assert documents.resolve_storage_key(upload_root, doc.storage_key).read_bytes() == b"harmless audit marker"
++        record("upload_path_traversal_blocked", "Client filename is metadata; content stays within configured storage")
+         # No real model is loaded and no network requests are made.
+         with patch.object(documents, "RetrieverManager", side_effect=RuntimeError("synthetic index outage")):
+             await documents.store_document(doc, [DocumentChunk(index=0, content="chunk", metadata={"page": 7})], [[0.1, 0.2]], EmbeddingConfig())
+@@ -199,8 +230,9 @@ async def run(temp):
+         async with factory() as db:
+             saved = await db.get(Document, doc.id)
+             chunks = (await db.scalars(select(Embedding).where(Embedding.document_id == doc.id))).all()
+-            assert saved.status == SourceStatus.ready and len(chunks) == 2
+-            record("index_failure_and_duplicate_chunks", {"status_after_index_failure": saved.status.value, "rows_after_two_runs": len(chunks), "stored_chunk_metadata": chunks[0].metadata_})
++            assert len(chunks) == 1 and chunks[0].metadata_ == {"page": 7}
++            record("chunk_replacement_and_metadata", {"rows_after_two_runs": len(chunks), "stored_chunk_metadata": chunks[0].metadata_})
++            record("index_failure_readiness_pending_batch_4", saved.status.value)
+ 
+     # Logout and refresh reuse, with a disposable user and no HTTP server.
+     token = create_refresh_token(user_id)
+@@ -216,8 +248,9 @@ async def run(temp):
+     command.upgrade(cfg, "head")
+     sync_engine = create_engine(f"sqlite:///{temp / 'migration.sqlite'}")
+     columns = [c["name"] for c in inspect(sync_engine).get_columns("chat_sessions")]
+-    assert "deleted_at" not in columns
+-    record("migration_missing_column", {"missing": "chat_sessions.deleted_at", "actual_columns": columns})
++    assert "deleted_at" in columns
++    assert "ix_chat_sessions_deleted_at" in {index["name"] for index in inspect(sync_engine).get_indexes("chat_sessions")}
++    record("migration_deleted_at_present", {"actual_columns": columns})
+     sync_engine.dispose()
+ 
+     error_app = FastAPI()
+diff --git a/backend/.env.example b/backend/.env.example
+index ccfb213..f38e779 100644
+--- a/backend/.env.example
++++ b/backend/.env.example
+@@ -2,8 +2,9 @@ DOCPRO_APP_NAME=DOCPRO V2 API
+ DOCPRO_ENVIRONMENT=development
+ DOCPRO_DEBUG=false
+ DOCPRO_API_V1_PREFIX=/api/v1
+-DOCPRO_DATABASE_URL=postgresql+asyncpg://docpro:docpro@postgres:5432/docpro
+-DOCPRO_REDIS_URL=redis://redis:6379/0
++# DATABASE_URL is also accepted; DOCPRO_DATABASE_URL takes precedence.
++DOCPRO_DATABASE_URL=postgresql+asyncpg://docpro:docpro@localhost:5432/docpro
++DOCPRO_REDIS_URL=redis://localhost:6379/0
+ DOCPRO_CORS_ORIGINS=["http://localhost:5173"]
+ DOCPRO_LOG_LEVEL=INFO
+ DOCPRO_JWT_SECRET_KEY=change-me-in-production
+diff --git a/backend/README.md b/backend/README.md
+index c2fe6dd..6f144e8 100644
+--- a/backend/README.md
++++ b/backend/README.md
+@@ -16,6 +16,37 @@ Open Swagger UI at `http://localhost:8000/docs`. The health endpoint is
+ available at `http://localhost:8000/api/v1/health` and reports `degraded`
+ until PostgreSQL and Redis are reachable.
+ 
++## Local PostgreSQL bootstrap
++
++The API and Alembic load `backend/.env` regardless of the working directory.
++`DOCPRO_DATABASE_URL` takes precedence over `DATABASE_URL`; without either,
++the default is `postgresql+asyncpg://docpro:docpro@localhost:5432/docpro`.
++An authentication failure is reported by the selected database; it does not
++silently switch databases or credentials.
++
++For a new local installation using the example credentials, run these commands
++as a PostgreSQL administrator. Keep the two `-c` statements separate because
++`CREATE DATABASE` cannot run in a transaction block:
++
++```bash
++psql -X -d postgres -v ON_ERROR_STOP=1 \
++  -c "CREATE ROLE docpro WITH LOGIN PASSWORD 'docpro' NOSUPERUSER NOCREATEDB NOCREATEROLE;" \
++  -c "CREATE DATABASE docpro OWNER docpro;"
++export DOCPRO_DATABASE_URL='postgresql+asyncpg://docpro:docpro@localhost:5432/docpro'
++../ragfusion_env/bin/python -m alembic upgrade head
++```
++
++The last command assumes the current directory is `backend`. From the repository
++root, use `ragfusion_env/bin/python -m alembic -c backend/alembic.ini upgrade head`.
++The application role owns its database and can run migrations without being a
++superuser. Match the role password to your own `.env`; the sample password above
++is for local development. If you use the standard `DATABASE_URL` name, remove
++any competing `DOCPRO_DATABASE_URL` setting.
++
++On the audited workstation, Batch 2 created the previously missing local role
++and database using the existing `backend/.env` password, preserved that file,
++and applied revision `20261005_0001`. Do not rerun the creation commands there.
++
+ ## Docker
+ 
+ ```bash
+@@ -24,6 +55,12 @@ docker compose up --build
+ 
+ The Compose stack starts the API, PostgreSQL, and Redis. It uses `.env` for
+ the API configuration and waits for the database and cache health checks.
++Inside Compose, the API explicitly connects to `postgres:5432` and `redis:6379`.
++PostgreSQL is published only on `127.0.0.1:55432`, avoiding the local server's
++port 5432. To run the API on the host against Compose PostgreSQL, set
++`DOCPRO_DATABASE_URL=postgresql+asyncpg://docpro:docpro@localhost:55432/docpro`.
++The image's `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` initialize
++an empty volume only; changing those variables does not reset an existing volume.
+ 
+ ## Verification
+ 
+@@ -58,6 +95,31 @@ does not establish that a fresh dependency installation works.
+ it is not a passing-security check. A02 verification requires the restored
+ source files to be in the Git index or committed.
+ 
++Batch 2's positive regression probe runs independently of the unresolved Batch 1
++dependency installation check:
++
++```bash
++ragfusion_env/bin/python audits/2026-10-04/verify_findings.py --batch 2
++```
++
++By default this checks SQLite and reports skipped PostgreSQL cases explicitly.
++For real locking verification, set `BATCH2_POSTGRES_URL` to a disposable PostgreSQL
++server URL whose test administrator can create databases. The tests create and
++drop randomly named databases and never use the application's data tables.
++
++The Batch 2 migration keeps the newest SQL embedding row per document/chunk and
++preserves other source types. Downgrade removes the constraints and `deleted_at`
++column but cannot reconstruct discarded duplicate chunks or deleted timestamps.
++If legacy settings have negative overlap or overlap greater than or equal to
++chunk size, upgrade stops before schema changes. Inspect and correct those
++settings before retrying; the migration does not silently rewrite user settings:
++
++```sql
++SELECT user_id, chunk_size, chunk_overlap
++FROM user_settings
++WHERE chunk_overlap < 0 OR chunk_overlap >= chunk_size;
++```
++
+ ## Database architecture
+ 
+ The application uses async SQLAlchemy sessions and repositories. PostgreSQL is
+diff --git a/backend/alembic.ini b/backend/alembic.ini
+index fc529d7..2941d98 100644
+--- a/backend/alembic.ini
++++ b/backend/alembic.ini
+@@ -2,4 +2,4 @@
+ script_location = %(here)s/alembic
+ prepend_sys_path = %(here)s
+ path_separator = os
+-sqlalchemy.url = postgresql://docpro:docpro_password@localhost:5432/docpro
++# Resolved through app.config.settings, unless explicitly overridden by a caller.
+diff --git a/backend/alembic/env.py b/backend/alembic/env.py
+index d015631..bf3ff63 100644
+--- a/backend/alembic/env.py
++++ b/backend/alembic/env.py
+@@ -1,12 +1,17 @@
+ """Alembic migration environment."""
+ 
++import asyncio
+ from logging.config import fileConfig
+ 
+-from sqlalchemy import engine_from_config, pool
++from sqlalchemy import create_engine, pool
++from sqlalchemy.engine import make_url
++from sqlalchemy.ext.asyncio import create_async_engine
+ 
+ import app.models.entities  # noqa: F401 - registers every model with Base.metadata
+ from alembic import context
+ from app.models.base import Base
++from app.config.settings import get_settings
++from app.db.session import to_async_database_url
+ 
+ config = context.config
+ if config.config_file_name and config.file_config.has_section("formatters"):
+@@ -14,11 +19,16 @@ if config.config_file_name and config.file_config.has_section("formatters"):
+ target_metadata = Base.metadata
+ 
+ 
++def database_url() -> str:
++    """Honor explicit test/tool URLs; CLI migrations use the API's settings."""
++    return config.get_main_option("sqlalchemy.url") or to_async_database_url(get_settings().database_url)
++
++
+ def run_migrations_offline() -> None:
+     """Run migrations without a database connection."""
+ 
+     context.configure(
+-        url=config.get_main_option("sqlalchemy.url"),
++        url=database_url(),
+         target_metadata=target_metadata,
+         literal_binds=True,
+         dialect_opts={"paramstyle": "named"},
+@@ -27,18 +37,36 @@ def run_migrations_offline() -> None:
+         context.run_migrations()
+ 
+ 
+-def run_migrations_online() -> None:
+-    """Run migrations against a live database."""
++def migrate(connection) -> None:
++    context.configure(connection=connection, target_metadata=target_metadata)
++    with context.begin_transaction():
++        context.run_migrations()
+ 
+-    connectable = engine_from_config(
+-        config.get_section(config.config_ini_section, {}),
+-        prefix="sqlalchemy.",
+-        poolclass=pool.NullPool,
+-    )
+-    with connectable.connect() as connection:
+-        context.configure(connection=connection, target_metadata=target_metadata)
+-        with context.begin_transaction():
+-            context.run_migrations()
++
++async def run_async_migrations(url: str) -> None:
++    engine = create_async_engine(url, poolclass=pool.NullPool)
++    try:
++        async with engine.connect() as connection:
++            await connection.run_sync(migrate)
++    finally:
++        await engine.dispose()
++
++
++def run_migrations_online() -> None:
++    """Support the async API driver and explicit synchronous test URLs."""
++    if config.attributes.get("connection") is not None:
++        migrate(config.attributes["connection"])
++        return
++    url = database_url()
++    if make_url(url).get_dialect().is_async:
++        asyncio.run(run_async_migrations(url))
++    else:
++        engine = create_engine(url, poolclass=pool.NullPool)
++        try:
++            with engine.connect() as connection:
++                migrate(connection)
++        finally:
++            engine.dispose()
+ 
+ 
+ if context.is_offline_mode():
+diff --git a/backend/app/api/documents.py b/backend/app/api/documents.py
+index d6a4bf7..d5736ce 100644
+--- a/backend/app/api/documents.py
++++ b/backend/app/api/documents.py
+@@ -42,6 +42,7 @@ from app.services.document import (
+     DocumentValidationError,
+     process_document,
+     upload_document,
++    resolve_storage_key,
+ )
+ 
+ router = APIRouter(prefix="/documents", tags=["documents"])
+@@ -144,10 +145,9 @@ async def upload_document_route(
+             config=config,
+         )
+ 
+-        # Process document in background (for now, synchronously)
+-        # TODO: Move to background task queue
++        # Processing currently completes within this request.
+         try:
+-            file_path = Path(settings.upload_dir) / document.storage_key
++            file_path = resolve_storage_key(Path(settings.upload_dir), document.storage_key)
+             await process_document(
+                 document.id,
+                 file_path,
+@@ -330,9 +330,12 @@ async def delete_document(
+ 
+     # Delete file from storage
+     settings = get_settings()
+-    file_path = Path(settings.upload_dir) / document.storage_key
++    try:
++        file_path = resolve_storage_key(Path(settings.upload_dir), document.storage_key)
++    except DocumentValidationError as exc:
++        raise HTTPException(status_code=400, detail=exc.message) from exc
+     if file_path.exists():
+-        file_path.unlink()
++        resolve_storage_key(Path(settings.upload_dir), document.storage_key).unlink()
+ 
+     # Delete document (cascades to embeddings)
+     await db.delete(document)
+@@ -384,7 +387,10 @@ async def reprocess_document(
+         )
+ 
+     settings = get_settings()
+-    file_path = Path(settings.upload_dir) / document.storage_key
++    try:
++        file_path = resolve_storage_key(Path(settings.upload_dir), document.storage_key)
++    except DocumentValidationError as exc:
++        raise HTTPException(status_code=400, detail=exc.message) from exc
+ 
+     if not file_path.exists():
+         raise HTTPException(
+diff --git a/backend/app/config/settings.py b/backend/app/config/settings.py
+index 4520d50..dccc929 100644
+--- a/backend/app/config/settings.py
++++ b/backend/app/config/settings.py
+@@ -1,8 +1,9 @@
+ """Typed configuration loaded from the environment."""
+ 
+ from functools import lru_cache
++from pathlib import Path
+ 
+-from pydantic import Field
++from pydantic import AliasChoices, Field
+ from pydantic_settings import BaseSettings, SettingsConfigDict
+ 
+ 
+@@ -10,10 +11,11 @@ class Settings(BaseSettings):
+     """Runtime settings for the API and its backing services."""
+ 
+     model_config = SettingsConfigDict(
+-        env_file=".env",
++        env_file=Path(__file__).resolve().parents[2] / ".env",
+         env_file_encoding="utf-8",
+         env_prefix="DOCPRO_",
+         extra="ignore",
++        populate_by_name=True,
+     )
+ 
+     app_name: str = "DOCPRO V2 API"
+@@ -21,7 +23,11 @@ class Settings(BaseSettings):
+     debug: bool = False
+     DEBUG: bool = False
+     api_v1_prefix: str = "/api/v1"
+-    database_url: str = "postgresql+asyncpg://docpro:docpro@postgres:5432/docpro"
++    database_url: str = Field(
++        default="postgresql+asyncpg://docpro:docpro@localhost:5432/docpro",
++        validation_alias=AliasChoices("DOCPRO_DATABASE_URL", "DATABASE_URL"),
++        min_length=1,
++    )
+     redis_url: str = "redis://redis:6379/0"
+     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8000", "http://127.0.0.1:8000"])
+     log_level: str = "INFO"
+diff --git a/backend/app/db/session.py b/backend/app/db/session.py
+index 4b07577..d3f9e16 100644
+--- a/backend/app/db/session.py
++++ b/backend/app/db/session.py
+@@ -29,7 +29,9 @@ def to_async_database_url(database_url: str) -> str:
+         "sqlite": "sqlite+aiosqlite",
+         "mysql": "mysql+aiomysql",
+     }
+-    return str(url.set(drivername=replacements.get(driver, driver)))
++    return url.set(drivername=replacements.get(driver, driver)).render_as_string(
++        hide_password=False
++    )
+ 
+ 
+ @lru_cache
+diff --git a/backend/app/models/entities.py b/backend/app/models/entities.py
+index b651aed..eb657bf 100644
+--- a/backend/app/models/entities.py
++++ b/backend/app/models/entities.py
+@@ -226,6 +226,7 @@ class Setting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+ class Embedding(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+     __tablename__ = "embeddings"
+     __table_args__ = (
++        UniqueConstraint("document_id", "chunk_index", name="uq_embeddings_document_chunk"),
+         Index("ix_embeddings_document_chunk", "document_id", "chunk_index"),
+         Index("ix_embeddings_website_chunk", "website_id", "chunk_index"),
+         Index("ix_embeddings_youtube_chunk", "youtube_source_id", "chunk_index"),
+diff --git a/backend/app/models/settings.py b/backend/app/models/settings.py
+index be56386..38852e9 100644
+--- a/backend/app/models/settings.py
++++ b/backend/app/models/settings.py
+@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
+ 
+ from sqlalchemy import (
+     Boolean,
++    CheckConstraint,
+     DateTime,
+     Enum,
+     Float,
+@@ -54,6 +55,7 @@ class UserSettings(Base):
+     __tablename__ = "user_settings"
+     __table_args__ = (
+         UniqueConstraint("user_id", name="uq_user_settings_user"),
++        CheckConstraint("chunk_overlap >= 0 AND chunk_overlap < chunk_size", name="ck_user_settings_chunk_overlap"),
+     )
+ 
+     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+@@ -109,4 +111,4 @@ class UserSettings(Base):
+     user: Mapped[User] = relationship(back_populates="user_settings")
+ 
+     def __repr__(self) -> str:
+-        return f"<UserSettings(user_id={self.user_id}, provider={self.provider}, model={self.model_name})>"
+\ No newline at end of file
++        return f"<UserSettings(user_id={self.user_id}, provider={self.provider}, model={self.model_name})>"
+diff --git a/backend/app/repositories/settings_repository.py b/backend/app/repositories/settings_repository.py
+index 8bf42b1..76b5b84 100644
+--- a/backend/app/repositories/settings_repository.py
++++ b/backend/app/repositories/settings_repository.py
+@@ -7,7 +7,8 @@ from typing import Any
+ from uuid import UUID
+ 
+ from sqlalchemy import select
+-from sqlalchemy.exc import IntegrityError
++from sqlalchemy.dialects.postgresql import insert as pg_insert
++from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from app.models.settings import UserSettings
+@@ -22,7 +23,7 @@ class SettingsRepository(Repository[UserSettings]):
+     def __init__(self, session: AsyncSession) -> None:
+         super().__init__(session, UserSettings)
+ 
+-    async def get_by_user_id(self, user_id: UUID) -> UserSettings | None:
++    async def get_by_user_id(self, user_id: UUID, *, for_update: bool = False) -> UserSettings | None:
+         """Get settings for a specific user.
+ 
+         Args:
+@@ -31,9 +32,11 @@ class SettingsRepository(Repository[UserSettings]):
+         Returns:
+             UserSettings instance or None if not found
+         """
+-        result = await self.session.execute(
+-            select(UserSettings).where(UserSettings.user_id == user_id)
+-        )
++        statement = select(UserSettings).where(UserSettings.user_id == user_id)
++        if for_update:
++            await self.session.flush()
++            statement = statement.with_for_update().execution_options(populate_existing=True)
++        result = await self.session.execute(statement)
+         return result.scalar_one_or_none()
+ 
+     async def create_default(self, user_id: UUID) -> UserSettings:
+@@ -48,15 +51,13 @@ class SettingsRepository(Repository[UserSettings]):
+         Raises:
+             IntegrityError: If settings already exist for the user
+         """
+-        settings = UserSettings(user_id=user_id)
+-        self.session.add(settings)
+-        try:
++        # A duplicate insert must not roll back unrelated work in the caller's
++        # transaction. The strict create API retains its duplicate-error contract.
++        async with self.session.begin_nested():
++            settings = UserSettings(user_id=user_id)
++            self.session.add(settings)
+             await self.session.flush()
+-            return settings
+-        except IntegrityError as e:
+-            await self.session.rollback()
+-            logger.warning(f"Settings already exist for user {user_id}: {e}")
+-            raise
++        return settings
+ 
+     async def get_or_create(self, user_id: UUID) -> UserSettings:
+         """Get existing settings or create defaults for a user.
+@@ -67,9 +68,23 @@ class SettingsRepository(Repository[UserSettings]):
+         Returns:
+             UserSettings instance
+         """
+-        settings = await self.get_by_user_id(user_id)
++        dialect = self.session.get_bind().dialect.name
++        if dialect == "postgresql":
++            insert = pg_insert
++        elif dialect == "sqlite":
++            insert = sqlite_insert
++        else:
++            raise NotImplementedError("Settings require PostgreSQL or SQLite")
++        await self.session.execute(
++            insert(UserSettings).values(user_id=user_id).on_conflict_do_nothing(
++                index_elements=[UserSettings.user_id]
++            )
++        )
++        # Held until the enclosing transaction commits/rolls back. Refresh cached
++        # ORM state after waiting, so validation sees the latest committed values.
++        settings = await self.get_by_user_id(user_id, for_update=True)
+         if settings is None:
+-            settings = await self.create_default(user_id)
++            raise RuntimeError("Settings disappeared during initialization")
+         return settings
+ 
+     async def update_settings(
+@@ -84,7 +99,7 @@ class SettingsRepository(Repository[UserSettings]):
+         Returns:
+             Updated UserSettings instance or None if not found
+         """
+-        settings = await self.get_by_user_id(user_id)
++        settings = await self.get_by_user_id(user_id, for_update=True)
+         if settings is None:
+             return None
+ 
+@@ -107,7 +122,7 @@ class SettingsRepository(Repository[UserSettings]):
+         from app.models.settings import LLMProvider, EmbeddingProvider
+         from app.schemas.settings import DEFAULT_SETTINGS
+ 
+-        settings = await self.get_by_user_id(user_id)
++        settings = await self.get_by_user_id(user_id, for_update=True)
+         if settings is None:
+             return None
+ 
+@@ -129,7 +144,7 @@ class SettingsRepository(Repository[UserSettings]):
+         await self.session.flush()
+         return settings
+ 
+-    async def delete(self, user_id: UUID) -> bool:
++    async def delete_by_user_id(self, user_id: UUID) -> bool:
+         """Delete user settings.
+ 
+         Args:
+@@ -138,7 +153,7 @@ class SettingsRepository(Repository[UserSettings]):
+         Returns:
+             True if deleted, False if not found
+         """
+-        settings = await self.get_by_user_id(user_id)
++        settings = await self.get_by_user_id(user_id, for_update=True)
+         if settings is None:
+             return False
+ 
+diff --git a/backend/app/services/document.py b/backend/app/services/document.py
+index d7f3fe4..012678b 100644
+--- a/backend/app/services/document.py
++++ b/backend/app/services/document.py
+@@ -13,6 +13,7 @@ from docx import Document as DocxDocument
+ from pypdf import PdfReader
+ from unstructured.cleaners.core import clean
+ from unstructured.partition.text import partition_text
++from sqlalchemy import delete, select
+ 
+ from app.config.settings import get_settings
+ from app.db.session import get_session_factory
+@@ -69,6 +70,23 @@ class DocumentProcessingError(Exception):
+         super().__init__(message)
+ 
+ 
++def resolve_storage_key(root: Path, key: str) -> Path:
++    """Resolve a relative storage key and reject escapes, including symlinks."""
++    try:
++        relative = Path(key)
++        resolved_root = root.resolve()
++        if not key or relative.is_absolute() or ".." in relative.parts or "\\" in key:
++            raise ValueError("Invalid storage key")
++        path = (resolved_root / relative).resolve()
++        if path == resolved_root or not path.is_relative_to(resolved_root):
++            raise ValueError("Storage key escapes root")
++        return path
++    except (OSError, ValueError, RuntimeError) as exc:
++        raise DocumentValidationError(
++            "Invalid document storage location", code="INVALID_STORAGE_KEY"
++        ) from exc
++
++
+ def detect_format(file_path: Path, content_type: str | None = None) -> DocumentFormat:
+     """
+     Detect document format from file extension and MIME type.
+@@ -495,11 +513,20 @@ async def store_document(
+     embeddings: list[list[float]],
+     config: EmbeddingConfig,
+ ) -> None:
+-    """Store document chunks and embeddings in database."""
++    """Atomically replace a document's SQL chunks, serialized on its owner row."""
++    if len(chunks) != len(embeddings) or len({c.index for c in chunks}) != len(chunks):
++        raise DocumentValidationError(
++            "Chunks must have unique indices and one embedding each",
++            code="INVALID_EMBEDDINGS",
++        )
+ 
+     async with get_session_factory()() as session:
+ 
+-        db_document = await session.get(Document, document.id)
++        db_document = await session.scalar(
++            select(Document).where(
++                Document.id == document.id, Document.user_id == document.user_id
++            ).with_for_update()
++        )
+ 
+         if db_document is None:
+             raise DocumentProcessingError(
+@@ -507,18 +534,19 @@ async def store_document(
+                 code="DOCUMENT_NOT_FOUND",
+             )
+ 
+-        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+-            emb = Embedding(
++        await session.execute(delete(Embedding).where(Embedding.document_id == document.id))
++        session.add_all([
++            Embedding(
+                 document_id=document.id,
+-                chunk_index=i,
++                chunk_index=chunk.index,
+                 content=chunk.content,
+                 vector=embedding,
+                 model_name=config.model_name,
+                 token_count=chunk.token_count,
+-                metadata=chunk.metadata,
+-            )
+-
+-            session.add(emb)
++                metadata_=chunk.metadata,
++            ) for chunk, embedding in zip(chunks, embeddings, strict=True)
++        ])
++        await session.flush()
+         
+         try:
+             retriever = RetrieverManager()
+@@ -532,13 +560,13 @@ async def store_document(
+                         "document_id": str(document.id),
+                         "user_id": str(document.user_id),
+                         "filename": getattr(document, "filename", "unknown"),
+-                        "chunk_index": i,
++                        "chunk_index": chunk.index,
+                     }
+-                    for i, chunk in enumerate(chunks)
++                    for chunk in chunks
+                 ],
+                 ids=[
+-                    f"{document.id}_chunk_{i}"
+-                    for i in range(len(chunks))
++                    f"{document.id}_chunk_{chunk.index}"
++                    for chunk in chunks
+                 ],
+             )
+             print("Inserted into ChromaDB:", len(result))
+@@ -576,6 +604,8 @@ async def process_document(
+         await session.commit()
+ 
+     try:
++        # Always derive the input from the persisted key, never the caller's path.
++        file_path = resolve_storage_key(Path(get_settings().upload_dir), document.storage_key)
+         # Step 1: Extract text and metadata
+         text, metadata = extract_text(file_path, format_)
+ 
+@@ -634,39 +664,41 @@ async def upload_document(
+     """
+     settings = get_settings()
+ 
+-    # Create upload directory
+-    upload_dir = Path(settings.upload_dir) / str(user_id)
+-    upload_dir.mkdir(parents=True, exist_ok=True)
+-
+     # Generate unique storage key
+     document_id = uuid.uuid4()
+-    storage_key = f"uploads/{user_id}/{document_id}/{filename}"
+-    file_path = Path(settings.upload_dir) / storage_key
++    storage_key = f"uploads/{user_id}/{document_id}/content"
++    root = Path(settings.upload_dir)
++    file_path = resolve_storage_key(root, storage_key)
+     file_path.parent.mkdir(parents=True, exist_ok=True)
++    created = False
++    committed = False
++    try:
++        # Exclusive creation also prevents accidental replacement on key collision.
++        async with aiofiles.open(resolve_storage_key(root, storage_key), "xb") as f:
++            created = True
++            await f.write(file_content)
+ 
+-    # Write file
+-    async with aiofiles.open(file_path, "wb") as f:
+-        await f.write(file_content)
+-
+-    # Validate
+-    validate_file(file_path, content_type, len(file_content))
+-    checksum = compute_checksum(file_path)
++        validate_file(resolve_storage_key(root, storage_key), content_type, len(file_content))
++        checksum = compute_checksum(resolve_storage_key(root, storage_key))
+ 
+-    # Create document record
+-    async with get_session_factory()() as session:
+-        document = Document(
+-            id=document_id,
+-            user_id=user_id,
+-            filename=filename,
+-            storage_key=storage_key,
+-            mime_type=content_type,
+-            size_bytes=len(file_content),
+-            checksum=checksum,
+-            status=SourceStatus.pending,
+-            metadata_={},
+-        )
+-        session.add(document)
+-        await session.commit()
+-        await session.refresh(document)
++        async with get_session_factory()() as session:
++            document = Document(
++                id=document_id,
++                user_id=user_id,
++                filename=filename,
++                storage_key=storage_key,
++                mime_type=content_type,
++                size_bytes=len(file_content),
++                checksum=checksum,
++                status=SourceStatus.pending,
++                metadata_={},
++            )
++            session.add(document)
++            await session.commit()
++            committed = True
++            await session.refresh(document)
++    finally:
++        if created and not committed:
++            resolve_storage_key(root, storage_key).unlink(missing_ok=True)
+ 
+     return document
+diff --git a/backend/docker-compose.yml b/backend/docker-compose.yml
+index 92dce10..a84509b 100644
+--- a/backend/docker-compose.yml
++++ b/backend/docker-compose.yml
+@@ -2,6 +2,9 @@ services:
+   api:
+     build: .
+     env_file: .env
++    environment:
++      DOCPRO_DATABASE_URL: postgresql+asyncpg://docpro:docpro@postgres:5432/docpro
++      DOCPRO_REDIS_URL: redis://redis:6379/0
+     ports:
+       - "8000:8000"
+     depends_on:
+@@ -12,6 +15,8 @@ services:
+ 
+   postgres:
+     image: postgres:16-alpine
++    ports:
++      - "127.0.0.1:55432:5432"
+     environment:
+       POSTGRES_DB: docpro
+       POSTGRES_USER: docpro
+diff --git a/backend/alembic/versions/20261005_0001_storage_integrity.py b/backend/alembic/versions/20261005_0001_storage_integrity.py
+new file mode 100644
+index 0000000..358d6f9
+--- /dev/null
++++ b/backend/alembic/versions/20261005_0001_storage_integrity.py
+@@ -0,0 +1,58 @@
++"""Add chat deletion timestamp and enforce ingestion/settings invariants.
++
++Revision ID: 20261005_0001
++Revises: 7efa7e63b3ce
++"""
++
++from alembic import op
++import sqlalchemy as sa
++
++revision = "20261005_0001"
++down_revision = "7efa7e63b3ce"
++branch_labels = None
++depends_on = None
++
++
++def upgrade() -> None:
++    connection = op.get_bind()
++    invalid = connection.scalar(sa.text(
++        "SELECT count(*) FROM user_settings "
++        "WHERE chunk_overlap < 0 OR chunk_overlap >= chunk_size"
++    ))
++    if invalid:
++        raise RuntimeError(
++            "Cannot apply storage integrity migration: invalid chunk settings exist. "
++            "Correct chunk_overlap to be >= 0 and < chunk_size, then retry."
++        )
++
++    op.add_column("chat_sessions", sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True))
++    op.create_index("ix_chat_sessions_deleted_at", "chat_sessions", ["deleted_at"])
++
++    # Keep the most recently written SQL chunk on existing repeated ingestions.
++    # NULL document_id rows belong to other source types and remain untouched.
++    op.execute(sa.text("""
++        DELETE FROM embeddings WHERE id IN (
++            SELECT id FROM (
++                SELECT id, row_number() OVER (
++                    PARTITION BY document_id, chunk_index
++                    ORDER BY updated_at DESC, created_at DESC, id DESC
++                ) AS position
++                FROM embeddings WHERE document_id IS NOT NULL
++            ) AS duplicates WHERE position > 1
++        )
++    """))
++    with op.batch_alter_table("embeddings") as batch:
++        batch.create_unique_constraint("uq_embeddings_document_chunk", ["document_id", "chunk_index"])
++    with op.batch_alter_table("user_settings") as batch:
++        batch.create_check_constraint(
++            "ck_user_settings_chunk_overlap", "chunk_overlap >= 0 AND chunk_overlap < chunk_size"
++        )
++
++
++def downgrade() -> None:
++    with op.batch_alter_table("user_settings") as batch:
++        batch.drop_constraint("ck_user_settings_chunk_overlap", type_="check")
++    with op.batch_alter_table("embeddings") as batch:
++        batch.drop_constraint("uq_embeddings_document_chunk", type_="unique")
++    op.drop_index("ix_chat_sessions_deleted_at", table_name="chat_sessions")
++    op.drop_column("chat_sessions", "deleted_at")
+diff --git a/backend/tests/test_batch2_integrity.py b/backend/tests/test_batch2_integrity.py
+new file mode 100644
+index 0000000..f02b85c
+--- /dev/null
++++ b/backend/tests/test_batch2_integrity.py
+@@ -0,0 +1,343 @@
++"""Batch 2 regressions against migrated SQLite and optional isolated PostgreSQL.
++
++Set BATCH2_POSTGRES_URL to a test server where the role can create databases.
++Every PostgreSQL test creates/drops its own randomly named database.
++"""
++from __future__ import annotations
++
++import asyncio
++import os
++from datetime import datetime, timedelta
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import Mock
++from uuid import uuid4
++
++import pytest
++import pytest_asyncio
++from alembic import command
++from alembic.config import Config
++from fastapi import HTTPException
++from sqlalchemy import event, func, inspect, select, text
++from sqlalchemy.engine import URL, make_url
++from sqlalchemy.exc import IntegrityError
++from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
++
++from app.api import documents as routes
++from app.config.settings import Settings
++from app.db.session import to_async_database_url
++from app.models.entities import Document, Embedding, User, Website
++from app.models.settings import UserSettings
++from app.repositories.settings_repository import SettingsRepository
++from app.schemas.document import DocumentChunk, DocumentFormat, EmbeddingConfig, ProcessingConfig
++from app.schemas.settings import SettingsUpdate
++from app.services import document as service
++from app.services.settings_service import SettingsService, SettingsValidationError
++
++ROOT = Path(__file__).resolve().parents[2]
++PREVIOUS = "7efa7e63b3ce"
++
++
++def migration_config(url):
++    config = Config(str(ROOT / "backend/alembic.ini"))
++    config.set_main_option("sqlalchemy.url", str(url).replace("%", "%%"))
++    return config
++
++
++@pytest_asyncio.fixture(params=["sqlite", "postgresql"])
++async def database(request, tmp_path):
++    admin = None
++    name = "batch2_" + uuid4().hex
++    if request.param == "postgresql":
++        configured = os.environ.get("BATCH2_POSTGRES_URL")
++        if not configured:
++            pytest.skip("Set BATCH2_POSTGRES_URL for real PostgreSQL verification")
++        url = make_url(to_async_database_url(configured)).set(database=name)
++        admin = create_async_engine(to_async_database_url(configured), isolation_level="AUTOCOMMIT")
++        async with admin.connect() as connection:
++            await connection.execute(text(f'CREATE DATABASE "{name}"'))
++        migration_url = url.render_as_string(hide_password=False)
++    else:
++        url = f"sqlite+aiosqlite:///{tmp_path / 'integrity.sqlite'}"
++        migration_url = f"sqlite:///{tmp_path / 'integrity.sqlite'}"
++    engine = create_async_engine(url)
++    if request.param == "sqlite":
++        @event.listens_for(engine.sync_engine, "connect")
++        def foreign_keys(connection, record):
++            connection.execute("PRAGMA foreign_keys=ON")
++    try:
++        await asyncio.to_thread(command.upgrade, migration_config(migration_url), "head")
++        yield SimpleNamespace(engine=engine, factory=async_sessionmaker(engine, expire_on_commit=False),
++                              migration_url=migration_url, dialect=request.param)
++    finally:
++        await engine.dispose()
++        if admin is not None:
++            async with admin.connect() as connection:
++                await connection.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
++            await admin.dispose()
++
++
++@pytest_asyncio.fixture
++async def owner(database):
++    async with database.factory() as session:
++        user = User(email=f"{uuid4()}@example.invalid")
++        session.add(user)
++        await session.commit()
++        return user
++
++
++@pytest.fixture
++def storage(database, tmp_path, monkeypatch):
++    root = tmp_path / "uploads-root"
++    settings = SimpleNamespace(upload_dir=str(root))
++    monkeypatch.setattr(service, "get_settings", lambda: settings)
++    monkeypatch.setattr(routes, "get_settings", lambda: settings)
++    monkeypatch.setattr(service, "get_session_factory", lambda: database.factory)
++    retriever = Mock()
++    retriever.add_documents.side_effect = lambda **values: values["ids"]
++    monkeypatch.setattr(service, "RetrieverManager", lambda: retriever)
++    return root
++
++
++def test_configuration_precedence_and_local_default(monkeypatch, tmp_path):
++    monkeypatch.delenv("DOCPRO_DATABASE_URL", raising=False)
++    monkeypatch.delenv("DATABASE_URL", raising=False)
++    assert make_url(Settings(_env_file=None).database_url).host == "localhost"
++    generic = "postgresql+asyncpg://generic:secret@localhost/generic"
++    prefixed = "postgresql+asyncpg://preferred:secret@localhost/preferred"
++    monkeypatch.setenv("DATABASE_URL", generic)
++    assert Settings(_env_file=None).database_url == generic
++    monkeypatch.setenv("DOCPRO_DATABASE_URL", prefixed)
++    assert Settings(_env_file=None).database_url == prefixed
++    monkeypatch.delenv("DOCPRO_DATABASE_URL")
++    monkeypatch.delenv("DATABASE_URL")
++    dotenv_file = tmp_path / "settings.env"
++    dotenv_file.write_text(f"DATABASE_URL={generic}\n")
++    assert Settings(_env_file=dotenv_file).database_url == generic
++
++
++@pytest.mark.parametrize("driver", ["postgresql", "postgresql+psycopg", "postgresql+asyncpg"])
++def test_password_round_trip(driver):
++    original = URL.create(driver, username="test", password="p@ss:/?#%+word", host="localhost", database="test")
++    converted = make_url(to_async_database_url(original.render_as_string(hide_password=False)))
++    assert converted.password == original.password
++    assert converted.drivername == "postgresql+asyncpg"
++
++
++def test_storage_helper_rejects_escapes_and_symlinks(tmp_path):
++    root = tmp_path / "root"
++    root.mkdir()
++    outside = tmp_path / "outside"
++    outside.mkdir()
++    (root / "link").symlink_to(outside, target_is_directory=True)
++    for key in ["../outside/file", str(outside / "file"), "link/file", "", ".", "a/../../file", "a\\..\\file"]:
++        with pytest.raises(service.DocumentValidationError, match="Invalid document storage location"):
++            service.resolve_storage_key(root, key)
++    assert service.resolve_storage_key(root, "uploads/user/doc/content") == root / "uploads/user/doc/content"
++
++
++async def test_upload_filename_is_metadata_only(database, owner, storage):
++    for filename in ["../../../../outside.txt", "/absolute.txt", "..\\..\\outside.txt"]:
++        doc = await service.upload_document(b"safe content", filename, "text/plain", owner.id)
++        assert doc.filename == filename
++        assert doc.storage_key == f"uploads/{owner.id}/{doc.id}/content"
++        assert service.resolve_storage_key(storage, doc.storage_key).read_bytes() == b"safe content"
++    assert not (storage.parent / "outside.txt").exists()
++
++
++async def test_invalid_upload_removes_uncommitted_file(database, owner, storage):
++    with pytest.raises(service.DocumentValidationError):
++        await service.upload_document(b"", "empty.txt", "text/plain", owner.id)
++    assert not list(storage.rglob("content"))
++    async with database.factory() as session:
++        assert await session.scalar(select(func.count()).select_from(Document)) == 0
++
++
++async def test_reprocess_and_delete_block_unsafe_keys_and_other_tenants(database, owner, storage, monkeypatch):
++    outside = storage.parent / "protected.txt"
++    outside.write_text("protected")
++    async with database.factory() as session:
++        document = Document(user_id=owner.id, filename="display.txt", storage_key="../protected.txt", mime_type="text/plain")
++        session.add(document)
++        await session.commit()
++        for operation in (routes.delete_document, routes.reprocess_document):
++            with pytest.raises(HTTPException) as denied:
++                await operation(document.id, SimpleNamespace(id=uuid4()), session)
++            assert denied.value.status_code == 404
++            with pytest.raises(HTTPException) as invalid:
++                await operation(document.id, owner, session)
++            assert invalid.value.status_code == 400
++        extractor = Mock(side_effect=AssertionError("Unsafe file was read"))
++        monkeypatch.setattr(service, "extract_text", extractor)
++        with pytest.raises(service.DocumentProcessingError):
++            await service.process_document(document.id, outside, DocumentFormat.txt, ProcessingConfig())
++        extractor.assert_not_called()
++        assert outside.read_text() == "protected"
++        assert await session.get(Document, document.id) is not None
++
++
++async def test_reingestion_replaces_chunks_and_preserves_other_documents(database, owner, storage):
++    first = await service.upload_document(b"content", "one.txt", "text/plain", owner.id)
++    second = await service.upload_document(b"content", "two.txt", "text/plain", owner.id)
++    chunks = [DocumentChunk(index=0, content="old", metadata={"page": 7}), DocumentChunk(index=1, content="tail")]
++    await service.store_document(first, chunks, [[.1], [.2]], EmbeddingConfig())
++    await service.store_document(second, chunks, [[.1], [.2]], EmbeddingConfig())
++    replacement = [DocumentChunk(index=0, content="new", metadata={"page": 9})]
++    for _ in range(2):
++        await service.store_document(first, replacement, [[.3]], EmbeddingConfig())
++    async with database.factory() as session:
++        rows = (await session.scalars(select(Embedding).where(Embedding.document_id == first.id))).all()
++        assert [(row.chunk_index, row.content, row.metadata_) for row in rows] == [(0, "new", {"page": 9})]
++        assert await session.scalar(select(func.count()).select_from(Embedding).where(Embedding.document_id == second.id)) == 2
++        session.add(Embedding(document_id=first.id, chunk_index=0, content="duplicate", vector=[.1], model_name="test"))
++        with pytest.raises(IntegrityError):
++            await session.flush()
++
++
++async def test_replace_rolls_back_on_database_error(database, owner, storage):
++    document = await service.upload_document(b"content", "one.txt", "text/plain", owner.id)
++    chunks = [DocumentChunk(index=0, content="original")]
++    await service.store_document(document, chunks, [[.1]], EmbeddingConfig())
++
++    def reject_insert(connection, cursor, statement, parameters, context, many):
++        if statement.lstrip().upper().startswith("INSERT INTO EMBEDDINGS"):
++            raise RuntimeError("Injected SQL insert failure after deletion")
++
++    event.listen(database.engine.sync_engine, "before_cursor_execute", reject_insert)
++    try:
++        with pytest.raises(RuntimeError, match="Injected SQL"):
++            await service.store_document(document, [DocumentChunk(index=0, content="replacement")], [[.2]], EmbeddingConfig())
++    finally:
++        event.remove(database.engine.sync_engine, "before_cursor_execute", reject_insert)
++    async with database.factory() as session:
++        assert await session.scalar(select(Embedding.content).where(Embedding.document_id == document.id)) == "original"
++    with pytest.raises(service.DocumentValidationError):
++        await service.store_document(document, chunks, [], EmbeddingConfig())
++
++
++async def test_settings_database_constraint_and_duplicate_savepoint(database, owner):
++    async with database.factory() as session:
++        repo = SettingsRepository(session)
++        await repo.create_default(owner.id)
++        unrelated = User(email=f"{uuid4()}@example.invalid")
++        session.add(unrelated)
++        with pytest.raises(IntegrityError):
++            await repo.create_default(owner.id)
++        await session.commit()
++        assert await session.get(User, unrelated.id) is not None
++        with pytest.raises(IntegrityError):
++            await session.execute(text("UPDATE user_settings SET chunk_overlap = chunk_size"))
++        await session.rollback()
++        value = await repo.get_by_user_id(owner.id)
++        assert value.chunk_overlap < value.chunk_size
++
++
++async def test_concurrent_settings_initialization(database, owner):
++    async def initialize():
++        async with database.factory() as session:
++            result = await SettingsRepository(session).get_or_create(owner.id)
++            await session.commit()
++            return result.id
++    identifiers = await asyncio.wait_for(asyncio.gather(*(initialize() for _ in range(6))), timeout=15)
++    assert len(set(identifiers)) == 1
++
++
++async def test_settings_lock_refreshes_stale_snapshot(database, owner):
++    if database.dialect != "postgresql":
++        pytest.skip("SELECT FOR UPDATE requires PostgreSQL")
++    async with database.factory() as setup:
++        await SettingsRepository(setup).get_or_create(owner.id)
++        await setup.commit()
++    async with database.factory() as first, database.factory() as second:
++        # Deliberately cache an old value in the losing transaction's identity map.
++        stale = await SettingsRepository(second).get_by_user_id(owner.id)
++        assert stale.chunk_overlap == 200
++        locked = await SettingsRepository(first).get_or_create(owner.id)
++        locked.chunk_overlap = 800
++        started = asyncio.Event()
++
++        async def competing_update():
++            started.set()
++            return await SettingsService(second).update_settings(owner.id, SettingsUpdate(chunk_size=500))
++
++        task = asyncio.create_task(competing_update())
++        try:
++            await started.wait()
++            with pytest.raises(asyncio.TimeoutError):
++                await asyncio.wait_for(asyncio.shield(task), timeout=.15)
++            await first.commit()
++            with pytest.raises(SettingsValidationError, match="chunk_overlap"):
++                await asyncio.wait_for(task, timeout=5)
++        finally:
++            if not task.done():
++                task.cancel()
++                await asyncio.gather(task, return_exceptions=True)
++            await second.rollback()
++    async with database.factory() as session:
++        current = await SettingsRepository(session).get_by_user_id(owner.id)
++        assert (current.chunk_size, current.chunk_overlap) == (1000, 800)
++
++
++async def test_concurrent_document_replacements(database, owner, storage):
++    if database.dialect != "postgresql":
++        pytest.skip("Document row locking requires PostgreSQL")
++    document = await service.upload_document(b"content", "one.txt", "text/plain", owner.id)
++    async def replace(value):
++        await service.store_document(document, [DocumentChunk(index=i, content=value) for i in range(3)], [[.1]] * 3, EmbeddingConfig())
++    await asyncio.wait_for(asyncio.gather(*(replace(str(i)) for i in range(4))), timeout=15)
++    async with database.factory() as session:
++        rows = (await session.scalars(select(Embedding).where(Embedding.document_id == document.id))).all()
++        assert len(rows) == 3
++        assert len({row.content for row in rows}) == 1
++
++
++async def test_migrated_schema_and_downgrade(database):
++    async with database.engine.connect() as connection:
++        def inspect_schema(sync):
++            schema = inspect(sync)
++            assert "deleted_at" in {column["name"] for column in schema.get_columns("chat_sessions")}
++            assert "ix_chat_sessions_deleted_at" in {index["name"] for index in schema.get_indexes("chat_sessions")}
++            assert "uq_embeddings_document_chunk" in {constraint["name"] for constraint in schema.get_unique_constraints("embeddings")}
++            assert "ck_user_settings_chunk_overlap" in {constraint["name"] for constraint in schema.get_check_constraints("user_settings")}
++            assert any(key["referred_table"] == "documents" and key["options"].get("ondelete") == "CASCADE" for key in schema.get_foreign_keys("embeddings"))
++        await connection.run_sync(inspect_schema)
++    await asyncio.to_thread(command.downgrade, migration_config(database.migration_url), PREVIOUS)
++    await asyncio.to_thread(command.upgrade, migration_config(database.migration_url), "head")
++
++
++async def test_upgrade_repairs_duplicate_chunks_without_changing_other_sources(database, owner):
++    config = migration_config(database.migration_url)
++    await asyncio.to_thread(command.downgrade, config, PREVIOUS)
++    async with database.factory() as session:
++        document = Document(user_id=owner.id, filename="legacy.txt", storage_key="uploads/legacy.txt")
++        website = Website(user_id=owner.id, url="https://example.invalid")
++        session.add_all([document, website])
++        await session.flush()
++        for index, content in enumerate(["old", "new"]):
++            session.add(Embedding(document_id=document.id, chunk_index=0, content=content,
++                                  vector=[.1], model_name="test", updated_at=datetime(2026, 1, 1) + timedelta(days=index)))
++            session.add(Embedding(website_id=website.id, chunk_index=0, content=content,
++                                  vector=[.1], model_name="test"))
++        await session.commit()
++        document_id, website_id = document.id, website.id
++    await asyncio.to_thread(command.upgrade, config, "head")
++    async with database.factory() as session:
++        assert (await session.scalars(select(Embedding.content).where(Embedding.document_id == document_id))).all() == ["new"]
++        assert await session.scalar(select(func.count()).select_from(Embedding).where(Embedding.website_id == website_id)) == 2
++        assert await session.get(User, owner.id) is not None
++
++
++async def test_invalid_legacy_settings_stop_upgrade_before_schema_changes(database, owner):
++    config = migration_config(database.migration_url)
++    await asyncio.to_thread(command.downgrade, config, PREVIOUS)
++    async with database.factory() as session:
++        session.add(UserSettings(user_id=owner.id, chunk_size=100, chunk_overlap=100))
++        await session.commit()
++    with pytest.raises(RuntimeError, match="invalid chunk settings exist"):
++        await asyncio.to_thread(command.upgrade, config, "head")
++    async with database.engine.begin() as connection:
++        columns = await connection.run_sync(lambda sync: inspect(sync).get_columns("chat_sessions"))
++        assert "deleted_at" not in {column["name"] for column in columns}
++        assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == PREVIOUS
++        await connection.execute(text("UPDATE user_settings SET chunk_overlap = 20"))
++    await asyncio.to_thread(command.upgrade, config, "head")
+diff --git a/audits/2026-10-04/BATCH_2.md b/audits/2026-10-04/BATCH_2.md
+new file mode 100644
+index 0000000..a1afc5f
+--- /dev/null
++++ b/audits/2026-10-04/BATCH_2.md
+@@ -0,0 +1,108 @@
++# Batch 2 checkpoint — 5 October 2026
++
++Branch: `audit-remediation`. Scope: A01, A03, A04, A10, A28 and local database
++bootstrap. Batch 3 has not started. No Git commits were created.
++
++## Implemented
++
++- **A01:** UUID-backed `uploads/{user_id}/{document_id}/content` keys. Client
++  filenames remain database display metadata. `resolve_storage_key` rejects
++  absolute paths, traversal, and symlink escapes. Upload, checksum/validation,
++  processing, reprocessing, cleanup, and deletion resolve stored keys within
++  the upload root. Failed uploads remove their uncommitted file. Existing safe
++  relative keys remain readable. API ownership checks remain in place.
++- **A03:** async URL conversion uses `render_as_string(hide_password=False)`.
++  Regression tests preserve reserved characters in passwords across supported
++  PostgreSQL driver conversions.
++- **A04:** revision `20261005_0001`, following the existing merged migration head,
++  adds nullable `chat_sessions.deleted_at` and its index.
++- **A10:** ingestion locks the owning document row, validates chunk/vector
++  cardinality, and atomically deletes/replaces its SQL embeddings. Metadata maps
++  to `metadata_`; chunk indices are preserved. A unique document/chunk constraint
++  blocks duplicate writes. The migration retains the newest existing duplicate
++  SQL row and preserves other source types. An injected insert failure verifies
++  rollback restores the previous chunks.
++- **A28:** settings initialization uses dialect-specific `ON CONFLICT DO NOTHING`
++  and locks the row for validation/update. Locked reads refresh cached ORM state.
++  Strict duplicate creation uses a savepoint and preserves unrelated transaction
++  work. Database CHECK enforces `0 <= chunk_overlap < chunk_size`. Invalid legacy
++  settings stop migration before schema changes. Corrected the existing
++  `delete_by_user_id` repository contract used by its tests.
++- **Connection configuration:** stable `backend/.env` location; prefixed and
++  standard database variables; localhost default. Alembic and API share the URL
++  configuration, with synchronous test URL overrides still supported. Compose
++  explicitly uses service hostnames and publishes PostgreSQL on loopback 55432.
++
++## Local runtime error resolved
++
++Read-only inspection confirmed the local PostgreSQL server had neither role
++`docpro` nor database `docpro`. The existing backend configuration already selected
++localhost:5432 but used a password different from the example in the request.
++
++Created the role with that existing configured password and
++`NOSUPERUSER NOCREATEDB NOCREATEROLE`, then created database `docpro` owned by it.
++The `.env` file and password were preserved. Applied the migrations to this new
++database. Verified through the application's actual async engine:
++
++- connection succeeds;
++- current user/database are both `docpro`;
++- migration revision is `20261005_0001`;
++- role is not a superuser;
++- `chat_sessions.deleted_at` exists.
++
++Exact example bootstrap commands for a fresh installation are in
++`backend/README.md`; do not recreate the workstation's now-existing role/database.
++
++## Verification
++
++- Positive Batch 2 probe: **27 passed, 2 skipped** against migrated SQLite and a
++  disposable PostgreSQL 17 cluster. The skips are SQLite versions of the two
++  PostgreSQL-only lock tests; both PostgreSQL versions passed.
++- Existing document, settings, database, and migration suites: **97 passed**.
++- Full backend collection: **310 tests, no collection errors**.
++- `git diff --check`: passed.
++
++Tests cover traversal filenames, external symlink paths, tenant denial, unsafe
++legacy keys, uncommitted-file cleanup, password preservation, row replacement,
++rollback, uniqueness, CHECK constraints, simultaneous first-use settings,
++stale settings snapshots, simultaneous document writes, fresh migrations,
++upgrade/downgrade, legacy duplicate cleanup, and invalid-settings preflight.
++
++PostgreSQL tests create/drop uniquely named databases. The disposable test server
++is stopped after verification; it is separate from the persistent local docpro
++database created for the application.
++
++## Reproduce
++
++From the repository root:
++
++```bash
++ragfusion_env/bin/python audits/2026-10-04/verify_findings.py --batch 2
++ragfusion_env/bin/python -m pytest -q backend/tests/test_documents.py backend/tests/test_settings.py backend/tests/test_database.py backend/tests/test_migrations.py
++ragfusion_env/bin/python -m pytest --collect-only -q
++ragfusion_env/bin/python -m alembic -c backend/alembic.ini current
++git diff --check
++git diff
++```
++
++Set `BATCH2_POSTGRES_URL` to a disposable test server with database-creation
++privileges to reproduce the PostgreSQL cases. Without it, the probe explicitly
++reports those cases skipped.
++
++## Limits and next checkpoint
++
++Batch 1's staged changes remain separate in the index. Batch 2 changes are left
++unstaged for review; they also modify files added/staged in Batch 1. Commit the
++existing Batch 1 index separately before staging Batch 2 if separate commits are
++desired. Do not use `git commit -a` to preserve that separation.
++
++Recommended Batch 2 commit message:
++
++```text
++fix(audit): complete batch 2 - storage and database integrity
++```
++
++The prior dependency-installation conflicts and unavailable Docker build remain
++unverified Batch 1 concerns. Chroma indexing failure/readiness semantics remain
++Batch 4 work. This checkpoint does not claim the entire application is yet
++production-ready. Wait for confirmation before Batch 3.
+diff --git a/audits/2026-10-04/batch-2-verification.json b/audits/2026-10-04/batch-2-verification.json
+new file mode 100644
+index 0000000..2331283
+--- /dev/null
++++ b/audits/2026-10-04/batch-2-verification.json
+@@ -0,0 +1,17 @@
++{
++  "batch": 2,
++  "findings": [
++    "A01",
++    "A03",
++    "A04",
++    "A10",
++    "A28"
++  ],
++  "passed": 27,
++  "skipped": [
++    "test_settings_lock_refreshes_stale_snapshot[sqlite]",
++    "test_concurrent_document_replacements[sqlite]"
++  ],
++  "postgresql": "tested",
++  "scope": "SQL storage integrity; vector failure/readiness behavior remains Batch 4"
++}

@@ -1,0 +1,29 @@
+{
+  "batch": 2,
+  "findings": [
+    "A01",
+    "A03",
+    "A04",
+    "A10",
+    "A28"
+  ],
+  "passed": 15,
+  "skipped": [
+    "test_upload_filename_is_metadata_only[postgresql]",
+    "test_invalid_upload_removes_uncommitted_file[postgresql]",
+    "test_reprocess_and_delete_block_unsafe_keys_and_other_tenants[postgresql]",
+    "test_reingestion_replaces_chunks_and_preserves_other_documents[postgresql]",
+    "test_replace_rolls_back_on_database_error[postgresql]",
+    "test_settings_database_constraint_and_duplicate_savepoint[postgresql]",
+    "test_concurrent_settings_initialization[postgresql]",
+    "test_settings_lock_refreshes_stale_snapshot[sqlite]",
+    "test_settings_lock_refreshes_stale_snapshot[postgresql]",
+    "test_concurrent_document_replacements[sqlite]",
+    "test_concurrent_document_replacements[postgresql]",
+    "test_migrated_schema_and_downgrade[postgresql]",
+    "test_upgrade_repairs_duplicate_chunks_without_changing_other_sources[postgresql]",
+    "test_invalid_legacy_settings_stop_upgrade_before_schema_changes[postgresql]"
+  ],
+  "postgresql": "not tested: set BATCH2_POSTGRES_URL",
+  "scope": "SQL storage integrity; vector failure/readiness behavior remains Batch 4"
+}

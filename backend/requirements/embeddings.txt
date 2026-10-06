@@ -1,0 +1,6 @@
+# Embedding layer dependencies
+sentence-transformers>=3.0,<4.0
+FlagEmbedding>=1.2,<2.0
+numpy>=1.26,<2.0
+# Keep the Transformers API compatible with the supported embedding providers.
+transformers>=4.41,<5.0

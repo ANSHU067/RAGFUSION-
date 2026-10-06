@@ -1,0 +1,52 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    environment:
+      RAGFUSION_DATABASE_URL: postgresql+asyncpg://docpro:docpro@postgres:5432/docpro
+      RAGFUSION_REDIS_URL: redis://redis:6379/0
+      RAGFUSION_UPLOAD_DIR: /var/lib/ragfusion/uploads
+      RAG_VECTOR_STORE_PATH: /var/lib/ragfusion/vectorstore
+    volumes:
+      - uploads_data:/var/lib/ragfusion/uploads
+      - vectors_data:/var/lib/ragfusion/vectorstore
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "127.0.0.1:55432:5432"
+    environment:
+      POSTGRES_DB: docpro
+      POSTGRES_USER: docpro
+      POSTGRES_PASSWORD: docpro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docpro -d docpro"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:
+  vectors_data:

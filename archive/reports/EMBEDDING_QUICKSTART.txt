@@ -1,0 +1,140 @@
+"""
+Embedding Layer - Quick Reference
+==================================
+
+INSTALLATION
+-----------
+pip install -r backend/requirements/embeddings.txt
+
+BASIC USAGE
+----------
+from app.services.embedding_service import get_embedding_service
+from app.config.embedding_config import get_embedding_config
+
+service = get_embedding_service()
+config = get_embedding_config("all-mpnet-base-v2")
+service.register_provider("default", config)
+
+embeddings = await service.embed_texts(["text1", "text2"])
+
+AVAILABLE MODELS
+---------------
+BAAI:
+  • bge-small-en-v1.5      (384 dim)
+  • bge-base-en-v1.5       (768 dim)
+  • bge-large-en-v1.5      (1024 dim)
+
+Sentence-Transformers:
+  • all-minilm-l6-v2       (384 dim)
+  • all-mpnet-base-v2      (768 dim)
+  • multi-qa-mpnet-base-dot-v1  (768 dim)
+
+NVIDIA (API):
+  • nvidia-embed-qa        (1024 dim)
+  • nvidia-nv-embed-v1     (4096 dim)
+
+KEY FEATURES
+-----------
+✓ Multi-provider support (BAAI, sentence-transformers, NVIDIA)
+✓ Automatic batch processing with configurable batch sizes
+✓ Two-tier caching (in-memory LRU + Redis persistent)
+✓ Async/await for high concurrency
+✓ L2 normalization for unit-length vectors
+✓ Dimension validation at runtime
+✓ Lazy model loading
+✓ GPU support (CUDA, MPS)
+
+TESTING
+-------
+# Standalone tests (no dependencies)
+python backend/verify_embedding_standalone.py
+
+# Full test suite
+cd backend && pytest tests/test_embedding_service.py -v
+
+FILES CREATED
+------------
+backend/app/services/
+  • embedding_service.py          Core service implementation
+  • embedding_cache.py            Redis cache backend
+  • embedding_integration.py      Integration helpers
+  • EMBEDDING_README.md           Full documentation
+
+backend/app/config/
+  • embedding_config.py           Pre-configured models
+
+backend/tests/
+  • test_embedding_service.py     Test suite
+
+backend/requirements/
+  • embeddings.txt                Dependencies
+
+examples/
+  • embedding_examples.py         Usage examples
+
+EXAMPLES
+--------
+# Single text
+embedding = await service.embed_text("query", provider_name="default")
+
+# Multiple texts
+embeddings = await service.embed_texts(["doc1", "doc2"], provider_name="default")
+
+# Large batch with automatic batching
+embeddings = await service.embed_batch(large_list, provider_name="default")
+
+# Multiple providers
+service.register_provider("fast", get_embedding_config("all-minilm-l6-v2"))
+service.register_provider("quality", get_embedding_config("bge-large-en-v1.5"))
+
+# Similarity search
+query_emb = await service.embed_text(query, provider_name="default")
+doc_embs = await service.embed_texts(documents, provider_name="default")
+similarities = np.dot(doc_embs, query_emb)
+top_k = np.argsort(similarities)[::-1][:5]
+
+CONFIGURATION
+------------
+Custom configuration:
+
+config = EmbeddingConfig(
+    provider="sentence-transformers",
+    model_name="your-model",
+    dimension=768,
+    batch_size=32,
+    max_length=512,
+    normalize=True,
+    cache_enabled=True,
+    device="cuda"  # or "cpu", "mps"
+)
+
+CACHE MANAGEMENT
+---------------
+# In-memory cache (automatic)
+provider.cache.size()
+provider.cache.clear()
+
+# Redis cache
+from app.services.embedding_cache import RedisCacheBackend
+
+cache = RedisCacheBackend("redis://localhost:6379/0")
+await cache.connect()
+await cache.clear_model("model-name")
+stats = await cache.get_stats()
+
+INTEGRATION
+----------
+See backend/app/services/embedding_integration.py for:
+  • Document chunk embedding
+  • ChromaDB integration
+  • Similarity search
+  • FastAPI endpoint examples
+
+NEXT STEPS
+----------
+1. Add FastAPI endpoints (POST /embed, POST /search)
+2. Integrate with vector store (ChromaDB/Pinecone)
+3. Connect to RAG pipeline
+4. Enable GPU acceleration
+5. Add monitoring/metrics
+"""

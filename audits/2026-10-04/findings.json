@@ -1,0 +1,460 @@
+[
+  {
+    "id": "A01",
+    "severity": "High",
+    "component": "Security",
+    "title": "Upload filenames escape storage and allow file overwrite",
+    "locations": [
+      "backend/app/services/document.py:643",
+      "backend/app/api/documents.py:312"
+    ],
+    "problem": "The multipart filename is concatenated into the storage key and opened with wb before validation. Authenticated users can traverse outside upload_dir and overwrite files writable by the API process. The stored key is later trusted by DELETE, so the same path can be unlinked. RCE depends on writable executable/configuration paths and was not attempted.",
+    "before": "storage_key = f\"uploads/{user_id}/{document_id}/{filename}\"\nfile_path = Path(settings.upload_dir) / storage_key\nasync with aiofiles.open(file_path, \"wb\") as f:\n    await f.write(file_content)",
+    "after": "# Client filenames are display metadata only. The storage tree must be\n# private to this service account; migrate/reject legacy unsafe keys.\nroot = Path(settings.upload_dir).resolve()\nstorage_key = f\"uploads/{user_id}/{document_id}/content\"\nfile_path = root / storage_key\nfile_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)\ncreated = False\ntry:\n    async with aiofiles.open(file_path, \"xb\") as f:\n        created = True\n        await f.write(file_content)\n    validate_file(file_path, content_type, len(file_content))\nexcept Exception:\n    if created:\n        file_path.unlink(missing_ok=True)\n    raise\n\n# Apply before opening OR deleting a pre-existing storage key:\ndef resolve_storage_key(root: Path, key: str) -> Path:\n    root = root.resolve()\n    path = (root / key).resolve()\n    if not path.is_relative_to(root) or path == root:\n        raise DocumentValidationError(\"Invalid storage key\")\n    return path",
+    "verification": "Run verify_findings.py: the actual upload service writes a harmless marker outside its configured root, entirely within a temporary directory. After remediation, a filename ../../../../outside.txt must never create a file outside the root; check delete handling of legacy traversal keys too.",
+    "evidence": "Reproduced offline against actual upload function"
+  },
+  {
+    "id": "A02",
+    "severity": "High",
+    "component": "Backend",
+    "title": "Required application source is absent from Git",
+    "locations": [
+      ".gitignore:17",
+      ".gitignore:72",
+      "backend/app/models/entities.py:1",
+      "backend/app/rag/embeddings/embedding_manager.py:1",
+      "frontend/src/lib/utils.js:1"
+    ],
+    "problem": "Broad lib/, models/, and embeddings/ ignore patterns hide real application source. These files exist locally but are not in git ls-files. A clean checkout loses the ORM models, embedding implementation, frontend utilities and validation schemas, causing import/build failures. A successful local build does not validate the deliverable repository.",
+    "before": "lib/\nmodels/\nembeddings/",
+    "after": "# Keep existing artifact ignores, but explicitly preserve source directories.\n!frontend/src/lib/\n!frontend/src/lib/**\n!backend/app/models/\n!backend/app/models/**\n!backend/app/rag/embeddings/\n!backend/app/rag/embeddings/**\n\n# Then stage the source files (after reviewing their content):\n# git add .gitignore frontend/src/lib backend/app/models backend/app/rag/embeddings",
+    "verification": "git ls-files backend/app/models backend/app/rag/embeddings frontend/src/lib currently returns no files. git check-ignore -v identifies the three rules. Verify a fresh checkout can import main and build the frontend.",
+    "evidence": "Confirmed with Git tracked-file and ignore inventories"
+  },
+  {
+    "id": "A03",
+    "severity": "High",
+    "component": "Database",
+    "title": "Database URL conversion replaces the real password with ***",
+    "locations": [
+      "backend/app/db/session.py:32"
+    ],
+    "problem": "SQLAlchemy URL.__str__ masks passwords. Re-parsing that result gives the async engine the literal password ***. PostgreSQL password authentication consequently fails even with correct configuration. SQLite tests cannot catch this.",
+    "before": "return str(url.set(drivername=replacements.get(driver, driver)))",
+    "after": "return url.set(\n    drivername=replacements.get(driver, driver)\n).render_as_string(hide_password=False)",
+    "verification": "Run verify_findings.py. Using synthetic credentials, assert make_url(to_async_database_url('postgresql://u:synthetic@localhost/db')).password == 'synthetic'. Then test PostgreSQL login in a disposable database. Never log the unmasked URL.",
+    "evidence": "Reproduced with installed SQLAlchemy 2.0.51"
+  },
+  {
+    "id": "A04",
+    "severity": "High",
+    "component": "Database",
+    "title": "Alembic head lacks chat_sessions.deleted_at",
+    "locations": [
+      "backend/app/models/entities.py:183",
+      "backend/alembic/versions/20260801_0001_initial_schema.py:1",
+      "backend/alembic/versions/7efa7e63b3ce_merge_migration_heads.py:1"
+    ],
+    "problem": "The ORM reads deleted_at, but no revision creates it. Upgrading an empty database to head succeeds and still leaves the column missing. Selecting ChatSession, including normal chat/history operations, fails. Tests build tables from ORM metadata and therefore conceal this schema drift.",
+    "before": "# ORM:\ndeleted_at: Mapped[datetime | None] = mapped_column(\n    DateTime(timezone=True), nullable=True, index=True\n)\n# No corresponding Alembic operation exists.",
+    "after": "# New revision; do not edit already-applied migrations.\nfrom alembic import op\nimport sqlalchemy as sa\n\nrevision = \"20261004_0001\"\ndown_revision = \"7efa7e63b3ce\"\nbranch_labels = None\ndepends_on = None\n\ndef upgrade():\n    op.add_column(\"chat_sessions\",\n        sa.Column(\"deleted_at\", sa.DateTime(timezone=True), nullable=True))\n    op.create_index(\"ix_chat_sessions_deleted_at\",\n                    \"chat_sessions\", [\"deleted_at\"])\n\ndef downgrade():\n    op.drop_index(\"ix_chat_sessions_deleted_at\", table_name=\"chat_sessions\")\n    op.drop_column(\"chat_sessions\", \"deleted_at\")",
+    "verification": "Run the audit probe: a fresh disposable Alembic database lacks deleted_at. After the migration, assert the column/index exist and run ORM chat CRUD against the migrated PostgreSQL schema, rather than Base.metadata.create_all().",
+    "evidence": "Reproduced through complete Alembic upgrade on disposable SQLite"
+  },
+  {
+    "id": "A05",
+    "severity": "High",
+    "component": "API",
+    "title": "Rate limiting is implemented but never installed",
+    "locations": [
+      "backend/main.py:17",
+      "backend/app/middleware/rate_limit_middleware.py:14"
+    ],
+    "problem": "create_app installs no RateLimitMiddleware or route limit dependency. Login hashing, signup, ingestion and billable chat can be repeated without application throttling. Simply installing the existing middleware is insufficient for multiple workers; it uses process-local state and trusts arbitrary X-Forwarded-For values. Reverse-proxy protections were not available for inspection.",
+    "before": "app.add_middleware(PerformanceMiddleware)\n# No RateLimitMiddleware registration.\nforwarded = request.headers.get(\"X-Forwarded-For\")",
+    "after": "# A shared Redis implementation matching the existing check() interface.\nimport math\nfrom redis.asyncio import Redis\nfrom app.core.rate_limiter import RateLimitResult\n\nclass RedisRateLimiter:\n    def __init__(self, redis: Redis):\n        self.redis = redis\n\n    async def check(self, key, policy):\n        window_ms = math.ceil(policy.window_seconds * 1000)\n        count, ttl = await self.redis.eval(\"\"\"\n            local n = redis.call('INCR', KEYS[1])\n            if n == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end\n            return {n, redis.call('PTTL', KEYS[1])}\n        \"\"\", 1, \"rate:\" + key, window_ms)\n        capacity = policy.limit + policy.burst\n        return RateLimitResult(count <= capacity, max(0, capacity-count),\n                               max(1, math.ceil(ttl/1000)))\n\n# During app construction; also aclose this client at shutdown.\napp.state.rate_redis = Redis.from_url(settings.redis_url)\napp.add_middleware(RateLimitMiddleware,\n    limiter=RedisRateLimiter(app.state.rate_redis))\n\n# Replace _identity: trust only ASGI's client address.\n# Configure Uvicorn trusted proxy addresses explicitly at deployment.\n@staticmethod\ndef _identity(request):\n    return f\"ip:{request.client.host if request.client else 'unknown'}\"",
+    "verification": "On a disposable instance, exceed seven login attempts per minute and expect 429 with Retry-After. Repeat across two workers and vary X-Forwarded-For: neither should reset the bucket. Add separate authenticated-user limits for ingestion/chat to bound shared-IP and distributed abuse. Fail closed with a controlled 503 if Redis is unavailable.",
+    "evidence": "Confirmed active middleware inventory; no load attack performed"
+  },
+  {
+    "id": "A06",
+    "severity": "High",
+    "component": "Security",
+    "title": "Logout does not revoke tokens; refresh tokens can be replayed",
+    "locations": [
+      "backend/app/api/auth.py:86",
+      "backend/app/services/auth.py:157"
+    ],
+    "problem": "Logout only decodes a bearer token. Refresh issues new JWTs without invalidating the old refresh token; no persistent revocation state is consulted. A copied refresh token remains usable after logout for its original 30-day lifetime. The separate JWTManager is not used by these routes; its in-memory revocation would not solve multi-process persistence either.",
+    "before": "# logout_endpoint:\ndecode_token(token)\nreturn LogoutResponse()\n\n# refresh:\npayload = decode_token(data.refresh_token)\nreturn create_token_response(user)",
+    "after": "# Minimal persistent revocation strategy: account-wide token epoch.\n# Add User.auth_version (integer, NOT NULL, default 0) via Alembic.\nauth_version: Mapped[int] = mapped_column(Integer, default=0,\n                                        server_default=\"0\", nullable=False)\n\n# Include the current epoch in BOTH access and refresh JWTs when issuing:\nto_encode[\"ver\"] = user.auth_version\n\n# After loading the user in BOTH get_current_user and refresh:\nif not user or not user.is_active or payload.get(\"ver\") != user.auth_version:\n    raise UnauthorizedError(\"Invalid or expired session\")\n\n# In refresh, atomically consume the refresh epoch before issuing replacements.\n# Changes create_token_response to include user.auth_version in both JWTs.\nold_version = payload.get(\"ver\")\nif not isinstance(old_version, int):\n    raise UnauthorizedError(\"Invalid session\")\nnew_version = await db.scalar(\n    update(User)\n    .where(User.id == user.id, User.auth_version == old_version)\n    .values(auth_version=User.auth_version + 1)\n    .returning(User.auth_version)\n)\nif new_version is None:\n    raise UnauthorizedError(\"Refresh token already used\")\nawait db.commit()\nuser.auth_version = new_version\nreturn create_token_response(user)\n\n# Logout authenticates an access token, then revokes all account tokens:\nawait db.execute(update(User).where(User.id == current_user.id)\n                 .values(auth_version=User.auth_version + 1))\nawait db.commit()\nreturn LogoutResponse()",
+    "verification": "The offline probe successfully refreshes the same JWT before and after logout. After the fix, both must fail after revocation, and two concurrent refresh requests must yield exactly one success. This minimal strategy intentionally revokes other devices on refresh/logout; for independent device sessions, move the epoch/rotation state into an auth_sessions table keyed by JWT sid. Update all token-creation callers and test concurrency.",
+    "evidence": "Reproduced against active auth service with disposable user"
+  },
+  {
+    "id": "A07",
+    "severity": "Medium",
+    "component": "Frontend",
+    "title": "Authentication and private browser state survive across user boundaries",
+    "locations": [
+      "frontend/src/services/auth.js:3",
+      "frontend/src/services/api.js:18",
+      "frontend/src/context/ChatContext.jsx:6",
+      "frontend/src/context/UploadContext.jsx:6",
+      "frontend/src/main.jsx:17"
+    ],
+    "problem": "Access and 30-day refresh tokens are JavaScript-readable in localStorage, increasing the consequence of any same-origin script compromise; no XSS exploit was confirmed. Logout clears token/profile keys but leaves docpro-current-chat, docpro-chat-session, and docpro-uploads. Providers live above the router and do not reset when identity changes. A second user on the same browser can encounter the previous user's cached content/state even though backend ownership checks remain present.",
+    "before": "localStorage.setItem(REFRESH_TOKEN_KEY, refresh_token)\nconst CURRENT_CHAT_STORAGE_KEY = 'docpro-current-chat'\nconst UPLOADS_STORAGE_KEY = 'docpro-uploads'\n// UserProvider/ChatProvider/UploadProvider remain mounted on logout.",
+    "after": "// Immediate privacy fix: clear private caches on every auth transition.\nconst PRIVATE_KEYS = [\n  'access_token', 'refresh_token', 'user', 'docpro-user', 'docpro-profile',\n  'docpro-current-chat', 'docpro-chat-session', 'docpro-uploads'\n]\nexport function clearSession() {\n  authSessionVersion += 1\n  PRIVATE_KEYS.forEach(key => localStorage.removeItem(key))\n}\n\n// Place this component INSIDE AuthProvider; remount all private state\n// on login/logout/account change.\nfunction PrivateState({ children }) {\n  const { user } = useAuth()\n  return (\n    <UserProvider key={user?.id || 'anonymous'}>\n      <ChatProvider><UploadProvider>{children}</UploadProvider></ChatProvider>\n    </UserProvider>\n  )\n}\n\n// Also gate ChatProvider.refreshHistory on useAuth().user and ignore stale\n// responses using an identity/epoch guard; remounting alone must not trigger\n// anonymous requests that redirect a visitor away from signup.\n\n// Export from api.js, and guard every async cache writer:\nexport const getAuthSessionVersion = () => authSessionVersion\n\n// Inside each private provider:\nconst ownSessionVersion = useRef(getAuthSessionVersion()).current\n// At the start of persist/saveToStorage (and after awaited reads):\nif (ownSessionVersion !== getAuthSessionVersion()) return\n\n// Durable token-storage redesign, in the auth endpoint response:\nresponse.set_cookie(\n    \"__Host-refresh\", refresh_token, secure=True, httponly=True,\n    samesite=\"lax\", path=\"/\", max_age=30 * 24 * 3600\n)\n// Keep access tokens only in memory; read refresh cookies server-side.\n// Enforce an exact allowed Origin on cookie-authenticated refresh/logout,\n// remove the refresh token from JSON, and clear the cookie on logout.",
+    "verification": "Log in as A, populate chat/upload caches, log out, then log in as B without reloading. B must see none of A's state, including after delayed A responses arrive. After the cookie redesign document.cookie must not expose the refresh token; untrusted Origin requests must be rejected. Test cross-tab logout through a storage/BroadcastChannel event.",
+    "evidence": "Static trace; browser exploit and cross-tab race not executed"
+  },
+  {
+    "id": "A08",
+    "severity": "High",
+    "component": "Backend",
+    "title": "Heavy synchronous work runs in async request paths; streaming has no total deadline",
+    "locations": [
+      "backend/app/services/document.py:553",
+      "backend/app/services/document.py:491",
+      "backend/app/services/auth.py:126",
+      "backend/app/services/chat_service.py:62",
+      "backend/app/services/chat_service.py:202",
+      "backend/app/api/documents.py:147"
+    ],
+    "problem": "Extraction, cleaning, chunking, Chroma construction/insertion and password hashing run directly in async functions. RAGPipeline initialization synchronously constructs a HuggingFace model for each request-scoped ChatService. The route advertises background ingestion but awaits it. /chat/stream has no enclosing timeout and buffers the whole LLM result before slicing it. A slow model/file/provider can stall other requests or retain workers beyond the apparent timeout; cancelling to_thread does not terminate its underlying work.",
+    "before": "password_hash = hash_password(data.password)\ntext, metadata = extract_text(file_path, format_)\nretriever = RetrieverManager()\nself.rag_pipeline = RAGPipeline()\nasync for chunk in self._run_rag_pipeline_stream(...):",
+    "after": "# Short-term: bounded offloading for local synchronous calls.\n# Create these limiters once per process; choose limits using resource budgets.\nimport anyio\nPASSWORD_LIMITER = anyio.CapacityLimiter(2)\nINGEST_LIMITER = anyio.CapacityLimiter(2)\n\npassword_hash = await anyio.to_thread.run_sync(\n    hash_password, data.password, limiter=PASSWORD_LIMITER)\ntext, metadata = await anyio.to_thread.run_sync(\n    extract_text, file_path, format_, limiter=INGEST_LIMITER)\n\n# Initialize/share immutable embedding/retrieval resources at app lifespan,\n# outside the event loop. Keep user-specific config separate per invocation.\napp.state.rag_pipeline = await anyio.to_thread.run_sync(RAGPipeline)\n\n# Both chat entry points need an enclosing deadline.\nasync with asyncio.timeout(self.timeout_seconds):\n    async for chunk in self._run_rag_pipeline_stream(\n        message=message, history=history, session_id=session_id,\n        top_k=top_k, max_tokens=max_tokens, temperature=temperature):\n        yield chunk",
+    "verification": "Inject a slow parser/hash/model constructor while measuring a lightweight /info request. It should remain responsive. Inject a never-completing provider and assert stream termination. Use provider-native network timeouts and a bounded durable worker queue with process-level time/memory limits for untrusted document parsing; threads alone do not contain decompression bombs or stop timed-out CPU work. Return 202 only after durably enqueueing a job.",
+    "evidence": "Static call-path analysis; no stress test against running services"
+  },
+  {
+    "id": "A09",
+    "severity": "High",
+    "component": "Backend",
+    "title": "Ingestion reports success when vector indexing fails; storage has no recovery contract",
+    "locations": [
+      "backend/app/services/document.py:521",
+      "backend/app/api/documents.py:147",
+      "frontend/src/components/upload/UploadCard.jsx:158",
+      "backend/app/api/documents.py:334",
+      "backend/app/api/youtube.py:274"
+    ],
+    "problem": "store_document catches Chroma errors and commits ready anyway. Upload swallows processing failures and returns an old detached Document status; the UI marks every successful HTTP upload Ready without inspecting status. File/SQL/vector mutations have separate commit points, so failures also leave orphaned vectors/files or a surviving row pointing at deleted storage. A PostgreSQL rollback cannot roll back Chroma or filesystem changes.",
+    "before": "except Exception as exc:\n    print(f\"ChromaDB insertion failed: {exc}\")\ndb_document.status = SourceStatus.ready\nawait session.commit()\n\n# upload route:\nexcept Exception:\n    pass",
+    "after": "# Never suppress indexing failure or mark an unindexed document ready.\ntexts = [chunk.content for chunk in chunks]\nmetadatas = [{\n    \"source_id\": str(document.id), \"source_type\": \"document\",\n    \"document_id\": str(document.id), \"user_id\": str(document.user_id),\n    \"filename\": document.filename, \"chunk_index\": i,\n} for i, chunk in enumerate(chunks)]\nstable_ids = [f\"{document.id}_chunk_{i}\" for i in range(len(chunks))]\ntry:\n    await asyncio.to_thread(\n        retriever.add_documents, texts, metadatas, stable_ids)\nexcept Exception as exc:\n    raise DocumentProcessingError(\n        \"Document indexing failed\", code=\"INDEX_FAILED\") from exc\ndb_document.status = SourceStatus.ready\nawait session.commit()\n\n# Synchronous upload contract: return the fresh persisted state.\n# Use 201 on completed ingestion, or enqueue durably and return 202/pending.\nawait process_document(document.id, file_path, format_, config)\ndocument = await db.get(Document, document.id, populate_existing=True)\nreturn DocumentUploadResponse(\n    document_id=document.id, filename=document.filename,\n    status=safe_document_status(document.status),\n    message=\"Document processing completed\")\n\n// Frontend: distinguish accepted/pending, failed, and actually ready.\nconst ready = data.status === 'ready'\nconst failed = data.status === 'failed'\nsetFiles(prev => prev.map(f => f.id === fileObj.id ? {\n  ...f, uploading: false, uploaded: ready,\n  processing: !ready && !failed,\n  error: failed ? 'Document processing failed' : null,\n  documentId: data.document_id\n} : f))",
+    "verification": "The probe forces RetrieverManager failure and observes ready in SQL. After the fix this must become failed/pending and never Ready in the UI. Inject failure after each SQL/file/vector operation and retry; require convergence with stable operation IDs. For durable production recovery, commit an outbox/job record with SQL state, have an idempotent worker perform external writes/deletes, and only then advance status.",
+    "evidence": "Reproduced index-failure success; cross-store failure scenarios statically traced"
+  },
+  {
+    "id": "A10",
+    "severity": "Medium",
+    "component": "Database",
+    "title": "Reprocessing duplicates chunks and loses metadata",
+    "locations": [
+      "backend/app/services/document.py:507",
+      "backend/app/models/entities.py:232",
+      "backend/app/api/documents.py:361"
+    ],
+    "problem": "Each reprocess appends Embedding rows without replacing existing rows. Composite indexes are non-unique, so repeated/concurrent runs create duplicate chunk positions. metadata=chunk.metadata writes an unmapped attribute instead of metadata_, silently losing page/strategy metadata. Chroma upserts stable IDs but shortened reprocessing can leave old trailing IDs. Embeddings also permit zero or multiple source foreign keys.",
+    "before": "for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):\n    emb = Embedding(document_id=document.id, chunk_index=i,\n        content=chunk.content, vector=embedding,\n        model_name=config.model_name, metadata=chunk.metadata)\n    session.add(emb)",
+    "after": "# In one SQL transaction; serialize jobs for this document.\nfrom sqlalchemy import delete, select\ndb_document = await session.scalar(select(Document)\n    .where(Document.id == document.id).with_for_update())\nif len(chunks) != len(embeddings):\n    raise DocumentProcessingError(\"Embedding count mismatch\")\nawait session.execute(delete(Embedding)\n    .where(Embedding.document_id == document.id))\nsession.add_all([\n    Embedding(document_id=document.id, chunk_index=i,\n        content=chunk.content, vector=vector,\n        model_name=config.model_name, token_count=chunk.token_count,\n        metadata_=chunk.metadata)\n    for i, (chunk, vector) in enumerate(zip(chunks, embeddings))\n])\n# Add after deduplicating existing data, in an Alembic revision:\nop.create_unique_constraint(\"uq_embedding_document_chunk\",\n    \"embeddings\", [\"document_id\", \"chunk_index\"])\nop.create_unique_constraint(\"uq_embedding_website_chunk\",\n    \"embeddings\", [\"website_id\", \"chunk_index\"])\nop.create_unique_constraint(\"uq_embedding_youtube_chunk\",\n    \"embeddings\", [\"youtube_source_id\", \"chunk_index\"])\nop.create_check_constraint(\"ck_embedding_one_source\", \"embeddings\",\n    \"(CASE WHEN document_id IS NULL THEN 0 ELSE 1 END + \"\n    \"CASE WHEN website_id IS NULL THEN 0 ELSE 1 END + \"\n    \"CASE WHEN youtube_source_id IS NULL THEN 0 ELSE 1 END) = 1\")",
+    "verification": "The probe stores one chunk twice and gets two rows with empty metadata instead of {'page':7}. After remediation the same job must retain one row and metadata. Reprocess a long file into fewer chunks and confirm obsolete Chroma IDs disappear. Couple vector replacement to A09's versioned/idempotent job; do not hold a database lock during expensive model inference.",
+    "evidence": "Reproduced duplicate rows and metadata loss"
+  },
+  {
+    "id": "A11",
+    "severity": "High",
+    "component": "Backend",
+    "title": "Container recreation loses uploads and the vector index",
+    "locations": [
+      "backend/docker-compose.yml:2",
+      "backend/app/config/settings.py:39",
+      "backend/app/core/rag_config.py:43",
+      "backend/Dockerfile:1"
+    ],
+    "problem": "Only PostgreSQL and Redis have volumes. Uploaded files default to /tmp/docpro_uploads and Chroma to ./data/vectorstore in the API container's writable layer. Recreating that container loses source files/index while SQL retains ready sources. The API image also runs as root and COPY . . has no backend .dockerignore, potentially copying local .env/data into the image when present.",
+    "before": "api:\n  build: .\n  env_file: .env\n  ports:\n    - \"8000:8000\"\n# No API volumes; Dockerfile ends with root-owned COPY . .",
+    "after": "# docker-compose.yml additions\nservices:\n  api:\n    environment:\n      DOCPRO_UPLOAD_DIR: /var/lib/docpro/uploads\n      RAG_VECTOR_STORE_PATH: /var/lib/docpro/vectorstore\n    volumes:\n      - uploads_data:/var/lib/docpro/uploads\n      - vectors_data:/var/lib/docpro/vectorstore\nvolumes:\n  uploads_data:\n  vectors_data:\n\n# Dockerfile, before switching user:\nRUN useradd --system --uid 10001 --create-home appuser \\\n    && mkdir -p /var/lib/docpro/uploads /var/lib/docpro/vectorstore \\\n    && chown -R appuser:appuser /var/lib/docpro /app\nUSER 10001\n\n# backend/.dockerignore\n.env\n.env.*\n!.env.example\ndata/\n*.db\n__pycache__/\n.pytest_cache/",
+    "verification": "In disposable deployment infrastructure, ingest a canary then recreate only the API container; verify file existence and retrieval after recreation. Inspect image contents without printing secrets and assert no .env is packaged. Use a managed vector service/object store for multi-host scaling; local named volumes alone are single-host persistence.",
+    "evidence": "Static deployment inspection; no container recreation performed"
+  },
+  {
+    "id": "A12",
+    "severity": "High",
+    "component": "Security",
+    "title": "Dormant crawler has SSRF bypasses and unchecked redirects",
+    "locations": [
+      "backend/app/services/crawler_service.py:53",
+      "backend/app/services/crawler_service.py:112",
+      "backend/app/api/routes.py:13"
+    ],
+    "problem": "URL validation blocks a few hostname strings, not resolved destinations. IPv4-mapped IPv6, ULA IPv6, abbreviated loopback, DNS-to-private hosts and redirects bypass it. The browser crawler has an additional subresource network path. This is a High-severity latent risk: the website router is commented out, so it is not remotely reachable through the current main app.",
+    "before": "for pattern in blocked_patterns:\n    if re.match(pattern, hostname):\n        raise CrawlerValidationError(...)\nasync with session.get(url, allow_redirects=follow_redirects) as response:\n    html = await response.text()",
+    "after": "# aiohttp-only fetch path: constrain DNS at connection time, disable\n# environment proxies, disable redirects, and bound the response body.\nimport ipaddress\nfrom aiohttp.resolver import DefaultResolver\n\nclass PublicResolver(DefaultResolver):\n    async def resolve(self, host, port=0, family=0):\n        records = await super().resolve(host, port, family)\n        for record in records:\n            address = ipaddress.ip_address(record[\"host\"])\n            if not address.is_global:\n                raise CrawlerValidationError(\"Destination is not public\")\n        return records\n\ndef validate_target(url):\n    parsed = urlparse(url)\n    if (parsed.scheme not in {\"http\", \"https\"} or not parsed.hostname\n        or parsed.username or parsed.password\n        or parsed.port not in {None, 80, 443}):\n        raise CrawlerValidationError(\"Invalid destination\")\n    try:\n        address = ipaddress.ip_address(parsed.hostname)\n    except ValueError:\n        return  # DNS results are checked by PublicResolver.\n    if not address.is_global:\n        raise CrawlerValidationError(\"Destination is not public\")\n\nvalidate_target(url)\nconnector = aiohttp.TCPConnector(resolver=PublicResolver(), use_dns_cache=False)\nasync with aiohttp.ClientSession(connector=connector, trust_env=False,\n        timeout=aiohttp.ClientTimeout(total=30)) as session:\n    async with session.get(url, allow_redirects=False) as response:\n        if 300 <= response.status < 400:\n            raise CrawlerValidationError(\"Redirects are disabled\")\n        response.raise_for_status()\n        body = bytearray()\n        async for block in response.content.iter_chunked(65536):\n            body.extend(block)\n            if len(body) > 2 * 1024 * 1024:\n                raise CrawlerValidationError(\"Response too large\")\n        html = body.decode(response.charset or \"utf-8\", errors=\"replace\")",
+    "verification": "The extracted validator accepts http://[::ffff:127.0.0.1]/, http://[fd00::1]/, http://127.1/, and http://localhost./ in offline probes; no internal URLs were fetched. Before enabling website routes test redirect, DNS rebinding and browser subresource cases in an isolated network. The snippet protects the aiohttp path only: disable Crawl4AI until its entire browser runs behind an egress policy blocking non-public destinations.",
+    "evidence": "Offline validator bypasses reproduced; route disabled"
+  },
+  {
+    "id": "A13",
+    "severity": "Medium",
+    "component": "Backend",
+    "title": "Saved AI settings and request generation options are ignored",
+    "locations": [
+      "backend/app/services/chat_service.py:66",
+      "backend/app/rag/pipelines/rag_pipeline.py:76",
+      "backend/app/rag/pipelines/rag_pipeline.py:418",
+      "backend/app/services/embedding_helper.py:36",
+      "backend/app/services/settings_service.py:43"
+    ],
+    "problem": "The UI persists provider/model/temperature/retrieval settings, but ChatService constructs a default Groq pipeline without loading them. max_tokens and temperature are written into metadata and never used at generation. Embedding generation hardcodes MiniLM despite recording/logging the caller's model_name, so stored provenance is false. top_k is also ignored during retrieval (A15). This can send work to an unintended provider and defeats cost/behavior controls.",
+    "before": "self.rag_pipeline = RAGPipeline()\nresponse = self.llm.invoke(lc_messages)\nmodel_key = \"all-minilm-l6-v2\"\nlogger.info(f\"Generating {len(texts)} embeddings with model '{model_name}'\")",
+    "after": "# Load persisted settings in the chat dependency.\nsaved = await SettingsService(db).get_settings(current_user.id)\n# Until other providers are actually wired, fail explicitly.\nif saved.provider != \"groq\":\n    raise HTTPException(422, \"Only Groq is currently supported for chat\")\npipeline = RAGPipeline(llm_model=saved.model_name,\n    temperature=saved.temperature, max_tokens=saved.max_tokens)\nreturn ChatService(db=db, user_id=current_user.id, rag_pipeline=pipeline)\n\n# In generation, honor validated per-request overrides without mutating\n# shared provider objects.\noptions = state.get(\"metadata\", {})\nkwargs = {key: options[key] for key in (\"temperature\", \"max_tokens\")\n          if options.get(key) is not None}\nresponse = self.llm.invoke(lc_messages, **kwargs)\n\n# Constructor must preserve 0.0:\ntemperature = rag_config.temperature if temperature is None else temperature\n\n# For the currently single-model embedding implementation:\nACTUAL_MODEL = \"sentence-transformers/all-MiniLM-L6-v2\"\nif model_name != ACTUAL_MODEL:\n    raise ValueError(\"Unsupported embedding model\")\nif dimensions not in {None, 384}:\n    raise ValueError(\"Unsupported embedding dimensions\")\n# Update API/schema/UI defaults and persisted model_name to ACTUAL_MODEL.",
+    "verification": "Mock the provider and inspect the model, temperature=0, max_tokens, and configured provider for a request. Unsupported choices must produce 422 before billable work. Inspect vector dimension and persisted model_name. For full provider support implement an allowlisted provider factory and reindex when changing embedding space; do not silently mix dimensions/models.",
+    "evidence": "Static trace across settings, chat and embedding layers"
+  },
+  {
+    "id": "A14",
+    "severity": "Medium",
+    "component": "Backend",
+    "title": "Conversation history is stored and fetched but discarded before the LLM",
+    "locations": [
+      "backend/app/services/chat_service.py:118",
+      "backend/app/services/chat_service.py:378",
+      "backend/app/rag/pipelines/rag_pipeline.py:337",
+      "backend/app/rag/pipelines/rag_pipeline.py:403"
+    ],
+    "problem": "_run_rag_pipeline accepts history but never places it in graph state. Prompt creation uses only the current question and retrieved documents, and conversion supports only system/user roles. Follow-up questions cannot use previous conversation turns despite the database/context work.",
+    "before": "state = {\"question\": message, \"metadata\": {...}}\nmessages = self.prompt_builder.build_rag_messages(\n    question=question, context_documents=context_docs,\n    include_metadata=True, include_scores=False)",
+    "after": "# Add history: List[Dict[str, str]] to RAGState, then include:\n# Preserve the existing question and authorization metadata unchanged.\nstate[\"history\"] = history\n\n# After constructing the existing current-question RAG messages:\nhistory = [\n    {\"role\": msg[\"role\"], \"content\": msg[\"content\"]}\n    for msg in state.get(\"history\", [])\n    if msg[\"role\"] in {\"user\", \"assistant\"}\n]\nmessages = [messages[0], *history, messages[-1]]\n\n# Preserve assistant turns when converting to LangChain messages:\nfrom langchain_core.messages import SystemMessage, HumanMessage, AIMessage\nconstructors = {\"system\": SystemMessage, \"user\": HumanMessage,\n                \"assistant\": AIMessage}\nlc_messages = [constructors[msg[\"role\"]](content=msg[\"content\"])\n               for msg in messages if msg[\"role\"] in constructors]",
+    "verification": "The probe passes a canary history message and confirms it never reaches graph input. Add an assertion that the final provider call includes the canary and assistant role in order. Enforce a tokenizer-based budget before adding history; current missing token counts must not be counted as zero. A conversation containing 'My project is Atlas' should answer 'What is my project?' from history.",
+    "evidence": "Reproduced with a stub graph; no LLM call"
+  },
+  {
+    "id": "A15",
+    "severity": "Medium",
+    "component": "Backend",
+    "title": "Global top-k retrieval can starve a tenant's own documents",
+    "locations": [
+      "backend/app/rag/pipelines/rag_pipeline.py:141",
+      "backend/app/rag/pipelines/rag_pipeline.py:206"
+    ],
+    "problem": "The pipeline retrieves ten nearest chunks across all users and only then filters to authorized source IDs. Ten other-user results can crowd out a user's valid eleventh result. The post-filter prevents those returned chunks from entering current chat context, so this is a relevance/availability bug, not a demonstrated cross-user data leak. Requested top_k does not control retrieval.",
+    "before": "retrieved_docs = self.retriever.retrieve(question, top_k=10)\nretrieved_docs = [doc for doc in retrieved_docs\n                  if self._is_authorized_source(doc[2], authorized_source_ids)]",
+    "after": "authorized = state[\"metadata\"][\"authorized_source_ids\"]\ntop_k = state[\"metadata\"].get(\"top_k\") or 5\nclauses = [\n    {field: {\"$in\": ids}}\n    for kind, field in (\n        (\"document\", \"document_id\"), (\"website\", \"website_id\"),\n        (\"youtube\", \"youtube_source_id\"))\n    if (ids := authorized.get(kind))\n]\nif not clauses:\n    retrieved_docs = []\nelse:\n    source_filter = clauses[0] if len(clauses) == 1 else {\"$or\": clauses}\n    retrieved_docs = self.retriever.retrieve(\n        question, top_k=top_k, filter_dict=source_filter)\n    # Retain the independent database-derived authorization check.\n    retrieved_docs = [\n        doc for doc in retrieved_docs\n        if self._is_authorized_source(doc[2], authorized)\n    ]",
+    "verification": "Seed ten very relevant foreign chunks and one slightly less relevant owned chunk; the owner's query must return the owned chunk and no foreign chunks. The probe confirms current retrieval has no filter and drops all ten foreign hits. Normalize/backfill legacy source identity metadata before this change; all new ingestion paths already have specific source IDs.",
+    "evidence": "Reproduced algorithm with stub retriever"
+  },
+  {
+    "id": "A16",
+    "severity": "Medium",
+    "component": "API",
+    "title": "Exception handler is registered for the wrong ValidationError class",
+    "locations": [
+      "backend/app/core/exceptions.py:184",
+      "frontend/src/services/api.js:85"
+    ],
+    "problem": "The Pydantic handler is decorated for the application's own ValidationError rather than PydanticValidationError. It calls .errors() on an AppException that lacks the method, changing intended 422 responses into 500s. Actual Pydantic errors raised inside a route miss the intended handler. Separately, getApiError ignores the backend's error.message/error.details.errors envelope, losing useful errors in forms.",
+    "before": "@app.exception_handler(ValidationError)\nasync def pydantic_validation_exception_handler(request, exc):\n    for error in exc.errors():\n        ...\n\nreturn detail || error.response?.data?.message || error.message",
+    "after": "# Keep AppException handling for application validation errors.\n@app.exception_handler(PydanticValidationError)\nasync def pydantic_validation_exception_handler(request, exc):\n    errors = [{\"field\": \".\".join(map(str, item[\"loc\"])),\n               \"message\": item[\"msg\"], \"type\": item[\"type\"]}\n              for item in exc.errors()]\n    return JSONResponse(status_code=422, content={\n        \"error\": {\"type\": \"ValidationError\",\n                  \"message\": \"Data validation failed\",\n                  \"details\": {\"errors\": errors}}})\n\n// Frontend contract:\nexport function getApiError(error, fallback = 'Request failed') {\n  const body = error.response?.data\n  if (Array.isArray(body?.error?.details?.errors))\n    return body.error.details.errors.map(item => item.message).join(', ')\n  if (typeof body?.error?.message === 'string') return body.error.message\n  if (Array.isArray(body?.detail))\n    return body.detail.map(item => item.msg).join(', ')\n  if (typeof body?.detail === 'string') return body.detail\n  return error.code === 'ECONNABORTED'\n    ? 'The request timed out. Please try again.'\n    : fallback\n}",
+    "verification": "The isolated FastAPI probe raises the application's ValidationError and receives 500. Expect 422 afterward. Test duplicate signup, invalid email, invalid chunk config and database errors through the browser; each should render a useful string without exposing internals.",
+    "evidence": "Handler failure reproduced with TestClient"
+  },
+  {
+    "id": "A17",
+    "severity": "Medium",
+    "component": "Security",
+    "title": "Raw internal errors reach API responses and saved chat messages",
+    "locations": [
+      "backend/app/services/chat_service.py:181",
+      "backend/app/services/chat_service.py:311",
+      "backend/app/api/documents.py:177",
+      "backend/app/api/youtube.py:86",
+      "backend/app/core/exceptions.py:236"
+    ],
+    "problem": "Chat embeds str(e) in persisted assistant messages and stream error events; ingestion exposes raw exception text; integrity errors expose exc.orig regardless of debug. Provider URLs, filesystem paths, schema/constraint names and submitted values can leak. Chat additionally returns HTTP 200 for unexpected failures, making clients record failures as successful answers.",
+    "before": "error_content = f\"An error occurred while processing your request: {str(e)}\"\nyield StreamChunk(type=\"error\", error=str(e))\n\"details\": {\"constraint\": str(exc.orig) if exc.orig else \"unknown\"}",
+    "after": "# Non-streaming service failure: let centralized handler return a failure.\nexcept Exception as exc:\n    logger.exception(\"Chat generation failed\")\n    raise AppException(\"Chat generation failed\", status_code=502) from exc\n\n# Stream already began: use a public error, not exception text.\nexcept Exception:\n    logger.exception(\"Chat stream failed\")\n    yield StreamChunk(type=\"error\", error=\"Chat generation failed\")\n\n# Constraint response:\nreturn JSONResponse(status_code=409, content={\n    \"error\": {\"type\": \"ConflictError\",\n              \"message\": \"The requested change conflicts with existing data\",\n              \"details\": {}, \"path\": request.url.path}\n})\n# Apply the same public-message policy to document/YouTube failures.\n# Persist internal diagnostics separately with restricted access and redaction.",
+    "verification": "Mock a provider/database failure whose message contains AUDIT_SECRET_CANARY. Assert the canary appears in neither HTTP/SSE bodies nor persisted assistant messages. Expect 502/503 for non-streaming dependency failures and a structured error event for streams. Verify debug cannot be enabled in production configuration.",
+    "evidence": "Static trace; no real secret was read or disclosed"
+  },
+  {
+    "id": "A18",
+    "severity": "Medium",
+    "component": "API",
+    "title": "Chunk configuration permits zero/negative progress and arbitrary strategies",
+    "locations": [
+      "backend/app/schemas/document.py:214",
+      "backend/app/services/document.py:478",
+      "backend/app/api/documents.py:93"
+    ],
+    "problem": "chunk_overlap is not constrained relative to chunk_size. The accepted values size=100, overlap=100, strategy=fixed cause range(..., step=0) to fail; greater overlap can produce zero chunks and potentially a ready empty document. Arbitrary strategy strings silently select the fixed branch. A frontend bypass is sufficient because these are server-accepted query parameters.",
+    "before": "strategy: str = Field(default=\"recursive\")\nfor i in range(0, len(words), chunk_size_words - overlap_words):",
+    "after": "from typing import Literal\nfrom pydantic import model_validator, ValidationError as PydanticValidationError\n\nclass ChunkingConfig(BaseModel):\n    chunk_size: int = Field(default=1000, ge=100, le=10000)\n    chunk_overlap: int = Field(default=200, ge=0, le=1000)\n    strategy: Literal[\"recursive\", \"semantic\", \"fixed\"] = \"recursive\"\n\n    @model_validator(mode=\"after\")\n    def valid_overlap(self):\n        if self.chunk_overlap >= self.chunk_size:\n            raise ValueError(\"chunk_overlap must be less than chunk_size\")\n        return self\n\n# In both upload and reprocess, construct config BEFORE writing/processing,\n# and convert construction errors into request validation errors:\ntry:\n    config = ProcessingConfig(chunking={\n        \"chunk_size\": chunk_size, \"chunk_overlap\": chunk_overlap,\n        \"strategy\": chunking_strategy})\nexcept PydanticValidationError as exc:\n    raise HTTPException(422, \"Invalid chunking configuration\") from exc",
+    "verification": "Offline probe currently raises 'range() arg 3 must not be zero'. In disposable API tests submit ?chunk_size=100&chunk_overlap=100&chunking_strategy=fixed and an unknown strategy; both must return 422 before writing a file. Test boundary 100/99 and empty extracted text.",
+    "evidence": "Reproduced schema acceptance and chunker failure"
+  },
+  {
+    "id": "A19",
+    "severity": "Medium",
+    "component": "Backend",
+    "title": "Embedding failure handler raises UnboundLocalError and masks the cause",
+    "locations": [
+      "backend/app/services/embedding_helper.py:66"
+    ],
+    "problem": "The raise statement is outside the except block. Python clears the exception variable e when leaving that block, so a provider failure becomes UnboundLocalError instead of the intended RuntimeError. This hides actionable diagnostics and contaminates the public error path.",
+    "before": "except Exception as e:\n    logger.error(f\"CRITICAL: Failed to generate embeddings: {e}\", exc_info=True)\nraise RuntimeError(f\"Embedding generation failed: {e}\") from e",
+    "after": "except Exception as exc:\n    logger.exception(\"Embedding generation failed\")\n    raise RuntimeError(\"Embedding generation failed\") from exc",
+    "verification": "The probe injects RuntimeError into service.embed_texts and receives UnboundLocalError. After fixing indentation assert the raised exception is RuntimeError, its message is public-safe, and __cause__ is the original provider error.",
+    "evidence": "Reproduced with mocked embedding service"
+  },
+  {
+    "id": "A20",
+    "severity": "Medium",
+    "component": "Frontend",
+    "title": "Chat navigation and overlapping responses restore the wrong conversation",
+    "locations": [
+      "frontend/src/pages/readers/ChatPage.jsx:27",
+      "frontend/src/pages/readers/ChatPage.jsx:59",
+      "frontend/src/pages/readers/ChatPage.jsx:123"
+    ],
+    "problem": "sessionId is initialized from the URL once and not synchronized when the search parameter changes. The history fetch has no cancellation/version guard. Sending in a new session sets sessionId and immediately triggers a history reload that can replace locally appended messages. New Chat clears UI but does not invalidate an in-flight send, whose completion can reopen the previous conversation. Empty fetched histories also leave previous messages because setMessages only runs for nonempty results.",
+    "before": "const [sessionId, setSessionId] = useState(() => searchParams.get('session'))\nconst session = await chatApi.getSession(sessionId)\nif (session?.messages?.length > 0) setMessages(restoredMessages)\nsetSessionId(response.session_id)",
+    "after": "// Distinguish URL-selected history from a session created by sending.\nconst routeSession = searchParams.get('session')\nconst sessionRef = useRef(routeSession)\nconst requestEpoch = useRef(0)\nconst sending = useRef(false)\n\nuseEffect(() => {\n  const epoch = ++requestEpoch.current\n  const controller = new AbortController()\n  sessionRef.current = routeSession\n  setMessages([])\n  if (routeSession) {\n    chatApi.getSession(routeSession, { signal: controller.signal })\n      .then(data => {\n        if (epoch === requestEpoch.current)\n          setMessages(data.messages || [])\n      })\n      .catch(error => {\n        if (!controller.signal.aborted)\n          toast.error(getApiError(error))\n      })\n  }\n  return () => { requestEpoch.current++; controller.abort() }\n}, [routeSession])\n\n// Service method accepts cancellation:\nasync function getSession(id, { signal } = {}) {\n  const { data } = await api.get(`/chat/sessions/${id}`, { signal })\n  return data\n}\n\n// At send start (keep the existing rendering/state updates):\nif (sending.current) return\nsending.current = true\nconst epoch = requestEpoch.current\ntry {\n  const response = await chatApi.sendMessage({\n    message: text, session_id: sessionRef.current, include_sources: true\n  })\n  if (epoch !== requestEpoch.current) return\n  sessionRef.current = response.session_id\n  setMessages(prev => [...prev, response.message])\n} finally {\n  if (epoch === requestEpoch.current) {\n    sending.current = false\n    setIsStreaming(false)\n  }\n}\n// New Chat increments requestEpoch and clears sessionRef/messages.\n// Invalidate or abort its pending send and reset visible loading state too.",
+    "verification": "Throttle GET/POST requests, open A then B, navigate to an empty session, click New Chat while a response is pending, and start a fresh chat. Late A results must never replace B/new chat. Server mutations require idempotency keys if an aborted POST can be retried; cancelling the browser request alone does not undo a persisted message.",
+    "evidence": "Static asynchronous flow analysis; browser race not executed"
+  },
+  {
+    "id": "A21",
+    "severity": "Medium",
+    "component": "Frontend",
+    "title": "Password recovery always claims success but has no backend",
+    "locations": [
+      "frontend/src/pages/auth/ForgotPasswordPage.jsx:27",
+      "frontend/src/pages/auth/ResetPasswordPage.jsx:44",
+      "backend/app/api/auth.py:1"
+    ],
+    "problem": "The UI posts to password-reset routes that do not exist. ForgotPassword catches every failure—including 404 and network failure—and announces that email was sent. ResetPassword tries to validate a token by posting it to the nonexistent confirmation endpoint without a new password. Users cannot recover their accounts. This is broken recovery, not a demonstrated reset-token takeover.",
+    "before": "await api.post('/auth/password-reset/', { email: data.email })\ncatch {\n  setSuccess(true)\n  toast.success('Reset link sent!')\n}",
+    "after": "// Safe release fix until a real recovery workflow exists:\n// replace both recovery pages with an explicit unavailable state and\n// remove the 'Forgot password?' action from LoginPage.\nexport default function RecoveryUnavailable() {\n  return (\n    <section aria-labelledby=\"recovery-title\">\n      <h1 id=\"recovery-title\">Password recovery is unavailable</h1>\n      <p>No reset email has been sent.</p>\n      <Link to=\"/login\">Return to sign in</Link>\n    </section>\n  )\n}\n\n// Once the backend exists, only a successful request sets success:\ntry {\n  await api.post('/auth/password-reset', { email: data.email })\n  setSuccess(true)\n} catch (error) {\n  setSuccess(false)\n  setError(getApiError(error, 'Unable to request password recovery'))\n}",
+    "verification": "OpenAPI has no reset route; verify both frontend calls return 404 on a local instance. The release fix must stop claiming email delivery. Full recovery implementation needs random single-use token hashes, short expiry, atomic consumption with password update and session revocation, queued email, uniform responses for unknown accounts, rate limits, and separate non-consuming token validation. No email workflow was tested.",
+    "evidence": "Missing routes confirmed from app.openapi()"
+  },
+  {
+    "id": "A22",
+    "severity": "Medium",
+    "component": "Frontend",
+    "title": "Unavailable website and mock search/dashboard features are exposed",
+    "locations": [
+      "backend/app/api/routes.py:13",
+      "frontend/src/routes/index.jsx:49",
+      "frontend/src/services/website.js:1",
+      "frontend/src/pages/dashboard/SearchPage.jsx:8",
+      "frontend/src/pages/dashboard/ChatsPage.jsx:10"
+    ],
+    "problem": "The website UI remains enabled while its router is commented out, guaranteeing 404s. Global Search filters hardcoded sample records, has a submit form without preventDefault, and result clicks do nothing. Chats, team and workspace pages also contain demonstration records rather than real account data. These are product capability gaps, not evidence of cross-user data leakage. The profile page explicitly labels itself a mock; it is excluded from this finding.",
+    "before": "# router.include_router(website_router)\nconst [results] = useState(mockResults)\n<form className=\"flex gap-4\">\n<Card onClick={() => {}}> ... </Card>",
+    "after": "// Define capabilities from the implemented server contract, not UI presence.\nexport const capabilities = Object.freeze({\n  websiteIngestion: false,\n  globalSearch: false,\n})\n\n// Use in route/menu construction; hide actions as well as routes.\nconst websiteRoutes = capabilities.websiteIngestion ? [{\n  path: '/website', element: <DashboardLayout />,\n  children: [{ path: 'reader',\n    lazy: lazyPage(() => import('../pages/readers/WebsiteReaderPage')) }]\n}] : []\n\n// For any retained demo search form, label it Demo and prevent reload:\n<form onSubmit={event => event.preventDefault()} className=\"flex gap-4\">",
+    "verification": "OpenAPI lacks /api/v1/website. Open Global Search with an empty real database: it still returns Q2 Financial Report.pdf. After gating, unavailable actions and sample metrics must not appear as real account data. Enable website only after A12 is resolved.",
+    "evidence": "Website contract confirmed at runtime; demo/profile flows inspected statically"
+  },
+  {
+    "id": "A23",
+    "severity": "Medium",
+    "component": "Database",
+    "title": "History has N+1 counts, incorrect message-count sorting, and unbounded message loading",
+    "locations": [
+      "backend/app/services/history_service.py:96",
+      "backend/app/services/history_service.py:332",
+      "backend/app/services/memory_service.py:76",
+      "backend/app/api/chat.py:189"
+    ],
+    "problem": "History performs one COUNT per returned session; message_count sorting actually sorts updated_at, yielding incorrect results. MemoryService.get_session eagerly loads every message even for ownership checks, and get_session_history queries all messages again. Long conversations therefore amplify latency/memory on ordinary chat/rename operations. Existing FK indexes are present, so this is not a blanket missing-index finding.",
+    "before": "for session in sessions:\n    message_count = await self._get_message_count(session.id)\nHistorySortField.message_count: ChatSession.updated_at\n.options(selectinload(ChatSession.messages))",
+    "after": "# Preaggregate counts once; use this in history list/search.\ncounts = (select(Message.chat_session_id,\n                 func.count(Message.id).label(\"message_count\"))\n          .group_by(Message.chat_session_id).subquery())\ncount_column = func.coalesce(counts.c.message_count, 0)\nstmt = (select(ChatSession, count_column.label(\"message_count\"))\n        .outerjoin(counts, counts.c.chat_session_id == ChatSession.id)\n        .where(ChatSession.user_id == user_id))\n# Apply existing status/search/date filters to stmt.\nsort_column = (count_column if sort.sort_by == HistorySortField.message_count\n               else self._get_sort_column(sort.sort_by))\nstmt = stmt.order_by(\n    sort_column.desc() if sort.sort_order == HistorySortOrder.desc\n    else sort_column.asc(), ChatSession.id\n).limit(pagination.page_size).offset(\n    (pagination.page - 1) * pagination.page_size)\nrows = (await self.db.execute(stmt)).all()\n# Build responses from (session, message_count), without per-row COUNT.\n\n# Ownership lookup: remove selectinload.\nstmt = select(ChatSession).where(\n    ChatSession.id == session_id, ChatSession.user_id == user_id)\n\n# History endpoint: paginate messages, with a stable cursor in production.\nmessages = await memory_service.get_messages(session_id, limit=100)",
+    "verification": "Record SQL query count for 1 vs 100 history sessions; it should remain constant. Create a recently updated one-message session and an older twenty-message session; descending message_count must show the latter first. Seed a large conversation and assert ownership/rename queries do not fetch message bodies. Adapt clear_session_messages to a bulk DELETE after removing eager loading; expose pagination in the API/UI rather than silently truncating history.",
+    "evidence": "Static SQL trace; no production query plan or load test"
+  },
+  {
+    "id": "A24",
+    "severity": "Medium",
+    "component": "Backend",
+    "title": "Soft-deleted chats remain active through the chat API",
+    "locations": [
+      "backend/app/services/memory_service.py:66",
+      "backend/app/services/memory_service.py:94",
+      "backend/app/services/history_service.py:222"
+    ],
+    "problem": "History DELETE sets deleted_at, but normal chat get/list/update paths do not filter it. A session moved to trash remains listed by /chat/sessions and accepts new messages by ID. The frontend uses both APIs, so trash behavior is inconsistent and users can unintentionally continue deleted conversations. Ownership checks still apply.",
+    "before": "select(ChatSession).where(\n    ChatSession.id == session_id, ChatSession.user_id == user_id)\n# list_sessions only filters user_id.",
+    "after": "# Add this predicate to normal chat lookup/list/count/update paths.\nstmt = select(ChatSession).where(\n    ChatSession.id == session_id,\n    ChatSession.user_id == user_id,\n    ChatSession.deleted_at.is_(None),\n)\n# Keep explicit history trash/restore operations able to access deleted rows.\n# For concurrent append/delete, lock the session row in a short transaction\n# and recheck deleted_at before persisting each turn.",
+    "verification": "Soft-delete a session with DELETE /api/v1/history/{id}; GET /api/v1/chat/sessions must exclude it and POST /api/v1/chat with that session_id must return 404. Restore explicitly and verify it becomes accessible again. Test deletion racing with generation.",
+    "evidence": "Static consistency check between both APIs"
+  },
+  {
+    "id": "A25",
+    "severity": "High",
+    "component": "Backend",
+    "title": "Dependency declarations cannot reproduce the working environment; tests cannot collect",
+    "locations": [
+      "backend/requirements/base.txt:1",
+      "backend/requirements/embeddings.txt:1",
+      "backend/Dockerfile:9",
+      "backend/tests/conftest.py:27",
+      "backend/app/services/youtube_service.py:322"
+    ],
+    "problem": "The Dockerfile installs only base.txt, but imported langchain_groq/langchain_huggingface/langchain_community and the configured Argon2 backend are not explicitly declared there; embedding requirements are separate. YouTube code uses the >=1.0 fetch/list interface while base.txt requires <1.0. Installed Crawl4AI 0.3.74, which satisfies the broad declared range, lacks BrowserConfig/CrawlerRunConfig and blocks every test via conftest. The local environment contains newer packages outside declared ranges and no youtube-transcript-api distribution. Current test results cannot establish backend correctness.",
+    "before": "youtube-transcript-api>=0.6,<1.0\npasslib[bcrypt]>=1.7,<2.0\n# Dockerfile:\nRUN pip install --no-cache-dir -r /tmp/requirements.txt\n# conftest eagerly imports the disabled website service.",
+    "after": "# Correct direct API requirements; resolve all remaining packages together\n# and commit a tested lock. These are requirements inputs, not a verified lock.\nyoutube-transcript-api>=1.0,<2.0\npasslib[argon2]>=1.7,<2.0\npython-multipart\nlangchain-groq\nlangchain-huggingface\nlangchain-community\nsentence-transformers\n# Select a tested Crawl4AI version exposing BrowserConfig/CrawlerRunConfig.\n# Align langchain/langgraph/chromadb/numpy constraints with that resolution.\n\n# Test-only service setup should not import disabled integrations globally.\n# Move ingestion_service import/patching into website-specific fixtures.\n\n# Add a dependency-contract test in the clean, locked environment:\ndef test_runtime_dependency_contract():\n    from crawl4ai import BrowserConfig, CrawlerRunConfig\n    from youtube_transcript_api import YouTubeTranscriptApi\n    from passlib.context import CryptContext\n    assert callable(YouTubeTranscriptApi().fetch)\n    assert callable(YouTubeTranscriptApi().list)\n    context = CryptContext(schemes=[\"argon2\"])\n    assert context.verify(\"audit-password\", context.hash(\"audit-password\"))\n    import main\n    assert main.app.openapi()[\"paths\"]",
+    "verification": "The selected backend suite stopped at conftest import with 'cannot import name BrowserConfig from crawl4ai'; no selected tests ran. In a fresh container install the committed lock, run pip check, import main, collect all tests, run migrations and service tests. Do not infer compatibility from the existing virtualenv. A resolved lock was not generated or installed during this audit.",
+    "evidence": "Observed collection failure and installed package metadata; upstream v1 API confirmed"
+  },
+  {
+    "id": "A26",
+    "severity": "Medium",
+    "component": "Frontend",
+    "title": "Chat attachments are never uploaded or sent to the backend",
+    "locations": [
+      "frontend/src/pages/readers/ChatPage.jsx:101",
+      "frontend/src/pages/readers/ChatPage.jsx:118",
+      "frontend/src/components/chat/PromptInput.jsx:47"
+    ],
+    "problem": "The chat UI accepts/labels attachments but sends only message, session_id and include_sources. Files stay in browser state and never enter document ingestion or source selection. PromptInput also holds its own attachment list, so clearing/removing parent attachments does not reliably clear the local list. Users can believe a response used a file that the server never received.",
+    "before": "attachments: attachments.length > 0 ? [...attachments] : undefined\nawait chatApi.sendMessage({\n  message: text, session_id: sessionId, include_sources: true\n})",
+    "after": "// Safe release fix until upload + ready-state + source-binding is complete:\n// remove attachment props from ChatPage's PromptInput and remove its\n// FilePreviewGrid/attachment state.\n<PromptInput\n  value={inputValue}\n  onChange={setInputValue}\n  onSubmit={handleSendMessage}\n  disabled={isStreaming}\n  isStreaming={isStreaming}\n  placeholder=\"Ask about documents uploaded in Document Reader\"\n/>\n\n// Full support needs one controlled attachment state, document upload,\n// awaited ready status, and server-validated source IDs on ChatRequest.\n// Do not imply that merely adding a local file provides LLM context.",
+    "verification": "Attach a canary text file and inspect outgoing network requests: no upload or file/source ID is sent. After gating, attachment controls should be absent. For full support, verify upload, failure handling, source ownership, status waiting and that removing an attachment removes it from the request's selected sources.",
+    "evidence": "Static UI/request trace"
+  },
+  {
+    "id": "A27",
+    "severity": "Low",
+    "component": "Frontend",
+    "title": "Icon-only upload controls lack accessible names",
+    "locations": [
+      "frontend/src/components/upload/UploadCard.jsx:273",
+      "frontend/src/components/upload/UploadCard.jsx:309"
+    ],
+    "problem": "Remove buttons in the upload list/grid contain only an X SVG and have no aria-label or text. A screen reader cannot distinguish their purpose or target file. This is a concrete accessibility blocker; contrast, keyboard focus and the rest of WCAG were not assessed by a full browser audit.",
+    "before": "<Button size=\"icon\" variant=\"ghost\"\n        onClick={() => removeFile(fileObj.id)}>\n  <X className=\"h-4 w-4\" />\n</Button>",
+    "after": "<Button\n  type=\"button\"\n  size=\"icon\"\n  variant=\"ghost\"\n  aria-label={`Remove ${fileObj.name}`}\n  onClick={() => removeFile(fileObj.id)}\n>\n  <X aria-hidden=\"true\" className=\"h-4 w-4\" />\n</Button>\n// Apply the equivalent label to FilePreviewGrid's onRemove control.",
+    "verification": "Run an accessible-name audit (axe button-name rule) with an uploaded file, and navigate with keyboard/screen reader. Each remove button must announce both action and file. No automated browser accessibility test was executed.",
+    "evidence": "Static JSX inspection"
+  },
+  {
+    "id": "A28",
+    "severity": "Medium",
+    "component": "Database",
+    "title": "Concurrent settings requests can violate cross-field invariants",
+    "locations": [
+      "backend/app/repositories/settings_repository.py:61",
+      "backend/app/services/settings_service.py:82",
+      "backend/app/models/settings.py:94"
+    ],
+    "problem": "get_or_create uses SELECT then INSERT: concurrent first reads can hit the unique user_id constraint instead of both returning settings. Updates validate size/overlap against independently read state without locking. From size=1000/overlap=200, concurrent size=300 and overlap=900 each validate locally but can commit size=300/overlap=900. No database CHECK prevents it.",
+    "before": "settings = await self.get_by_user_id(user_id)\nif settings is None:\n    settings = await self.create_default(user_id)\n\nvalidation_data = {\n    \"chunk_size\": settings.chunk_size,\n    \"chunk_overlap\": settings.chunk_overlap,\n}\nvalidation_data.update(update_dict)\nself._validate_updates(validation_data)",
+    "after": "# PostgreSQL get-or-create, then row lock in the same transaction:\nfrom sqlalchemy.dialects.postgresql import insert\nawait self.session.execute(\n    insert(UserSettings).values(user_id=user_id)\n    .on_conflict_do_nothing(index_elements=[UserSettings.user_id]))\nsettings = await self.session.scalar(\n    select(UserSettings).where(UserSettings.user_id == user_id)\n    .with_for_update().execution_options(populate_existing=True))\n# Now merge, validate, update and commit while holding that short row lock.\n\n# New migration (validate/repair any existing bad rows first):\nop.create_check_constraint(\"ck_settings_chunk_overlap\", \"user_settings\",\n    \"chunk_size >= 128 AND chunk_size <= 4096 \"\n    \"AND chunk_overlap >= 0 AND chunk_overlap < chunk_size\")",
+    "verification": "Use two independent PostgreSQL sessions synchronized after reading the original settings; submit size=300 and overlap=900 concurrently. Exactly one incompatible change should fail, and the persisted invariant must always hold. Concurrent first GET requests should both succeed. This requires real PostgreSQL isolation testing; it was not simulated with SQLite.",
+    "evidence": "Static TOCTOU analysis; concurrent PostgreSQL reproduction pending"
+  }
+]

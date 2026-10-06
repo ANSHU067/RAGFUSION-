@@ -1,0 +1,42 @@
+"""FastAPI startup and HTTP contract tests."""
+
+from fastapi.testclient import TestClient
+
+from main import app
+
+client = TestClient(app)
+
+
+def test_docs_are_available() -> None:
+    response = client.get("/docs")
+
+    assert response.status_code == 200
+
+
+def test_health_reports_dependencies(monkeypatch) -> None:
+    async def database_is_up() -> bool:
+        return True
+
+    monkeypatch.setattr("app.services.health.check_database_connection", database_is_up)
+    monkeypatch.setattr("app.services.health.check_redis_connection", lambda: True)
+
+    response = client.get("/api/v1/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "database": True, "redis": True}
+    assert response.headers["X-Request-ID"]
+
+
+def test_info_uses_settings_dependency() -> None:
+    response = client.get("/api/v1/info")
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "RAGFUSION API"
+
+
+def test_application_sets_security_headers() -> None:
+    response = client.get("/api/v1/info")
+
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert "content-security-policy" in response.headers

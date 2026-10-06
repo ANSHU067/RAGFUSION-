@@ -1,0 +1,96 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.secret
+*credentials*
+*secrets*
+.aws/
+
+# Python environments and caches
+.venv/
+venv/
+env/
+ENV/
+ragfusion_env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# Python packaging and build output
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.manifest
+*.spec
+
+# JavaScript dependencies and build output
+node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.production
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Local data, databases, vector stores, uploads, and logs
+data/
+uploads/
+vectorstore/
+chroma_db/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/
+*.save
+
+# IDE and operating-system files
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.DS_Store
+Thumbs.db
+
+# Keep application source directories tracked even when similarly named
+# generated directories exist elsewhere in the project.
+!frontend/src/lib/
+!frontend/src/lib/**
+!backend/app/models/
+!backend/app/models/**
+!backend/app/rag/embeddings/
+!backend/app/rag/embeddings/**
