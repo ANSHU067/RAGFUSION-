@@ -1,6 +1,6 @@
 """Top-level HTTP routes."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
@@ -26,10 +26,13 @@ router.include_router(dashboard_router)
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health_check() -> HealthResponse:
+async def health_check(request: Request) -> HealthResponse:
     """Report API dependency readiness."""
 
-    return HealthResponse.model_validate(await get_health_status())
+    # The application owns this client and closes it through the rate limiter.
+    # An injected in-memory limiter has no Redis dependency to probe.
+    redis_client = getattr(request.app.state.rate_limiter, "redis", None)
+    return HealthResponse.model_validate(await get_health_status(redis_client))
 
 
 @router.get("/info")

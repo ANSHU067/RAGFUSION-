@@ -55,6 +55,8 @@ class CrawlerValidationError(CrawlerError):
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 CRAWL_LIMITER = anyio.CapacityLimiter(2)
+# Azure WireServer is globally classified but exposes platform services.
+BLOCKED_PLATFORM_IPS = frozenset({ip_address("168.63.129.16"), ip_address("169.254.169.254")})
 logger = logging.getLogger(__name__)
 
 
@@ -63,7 +65,7 @@ def require_public_ip(host: str) -> None:
         address = ip_address(host)
     except ValueError as exc:
         raise CrawlerValidationError("Invalid resolved address") from exc
-    if not address.is_global or address.is_multicast or address.is_unspecified or address.is_reserved:
+    if address in BLOCKED_PLATFORM_IPS or not address.is_global or address.is_multicast or address.is_unspecified or address.is_reserved:
         raise CrawlerValidationError("Destination is not allowed")
     # Do not permit transition addresses that tunnel to a non-public IPv4 host.
     for embedded in (getattr(address, "ipv4_mapped", None), getattr(address, "sixtofour", None)):

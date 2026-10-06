@@ -81,7 +81,7 @@ async def test_auth_version_migration_backfills_existing_users(database, owner):
         assert await session.scalar(text('SELECT version_num FROM alembic_version')) == '20261006_0001'
 
 
-@pytest.mark.parametrize('address', ['127.0.0.1', '10.1.1.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:127.0.0.1', '100.64.0.1', '224.0.0.1', '64:ff9b::7f00:1', '::127.0.0.1', '2002:7f00:1::'])
+@pytest.mark.parametrize('address', ['127.0.0.1', '10.1.1.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:127.0.0.1', '100.64.0.1', '224.0.0.1', '64:ff9b::7f00:1', '::127.0.0.1', '2002:7f00:1::', '168.63.129.16', '::ffff:168.63.129.16', '2002:a83f:8110::'])
 async def test_resolver_rejects_private_or_mixed_dns_results(monkeypatch, address):
     resolve = AsyncMock(return_value=[{'host': '8.8.8.8'}, {'host': address}])
     monkeypatch.setattr(aiohttp.DefaultResolver, 'resolve', resolve)
@@ -107,7 +107,7 @@ async def test_resolver_rechecks_addresses_on_each_resolution(monkeypatch):
         await resolver.close()
 
 
-@pytest.mark.parametrize('url', ['http://127.0.0.1/', 'http://[::ffff:127.0.0.1]/', 'http://localhost./', 'http://[fd00::1]/', 'http://169.254.169.254/', 'http://name:password@example.com/'])
+@pytest.mark.parametrize('url', ['http://127.0.0.1/', 'http://[::ffff:127.0.0.1]/', 'http://localhost./', 'http://[fd00::1]/', 'http://169.254.169.254/', 'http://name:password@example.com/', 'http://168.63.129.16/', 'http://[::ffff:168.63.129.16]/', 'http://[2002:a83f:8110::]/'])
 async def test_literal_and_credential_urls_never_reach_http_client(url):
     session = SimpleNamespace(get=Mock(side_effect=AssertionError('Network access attempted')))
     with pytest.raises(crawler.CrawlerValidationError):

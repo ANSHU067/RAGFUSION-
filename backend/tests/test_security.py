@@ -152,3 +152,35 @@ def test_api_key_lifecycle_and_response_sanitization() -> None:
 def test_production_environment_requires_safe_values() -> None:
     with pytest.raises(EnvironmentValidationError):
         SecurityEnvironment(environment="production", cors_origins=("*",)).validate()
+
+
+@pytest.mark.parametrize("environment", ["production", "prod", " PRODUCTION "])
+@pytest.mark.parametrize("secret", [
+    "", "x", " " * 32, "x" * 31, "your-secret-key", "change-me-in-production",
+    "  YOUR-SECRET-KEY  ", " " * 32 + "your-secret-key" + " " * 32,
+])
+def test_production_rejects_short_or_placeholder_jwt_secrets(environment, secret):
+    with pytest.raises(EnvironmentValidationError, match="at least 32 characters"):
+        security_environment(environment=environment, jwt_secret=secret).validate()
+
+
+def test_production_accepts_32_character_jwt_secret():
+    security_environment(
+        environment="production", jwt_secret="0123456789abcdef0123456789ABCDEF",
+    ).validate()
+
+
+def test_development_keeps_local_secret_default():
+    SecurityEnvironment(environment="development").validate()
+
+
+def test_application_rejects_weak_production_jwt_secret(monkeypatch):
+    import main
+    from app.config.settings import Settings
+
+    monkeypatch.setattr(main, "get_settings", lambda: Settings(
+        _env_file=None, environment="production", jwt_secret_key="x",
+        cors_origins=["https://app.example.test"],
+    ))
+    with pytest.raises(EnvironmentValidationError, match="at least 32 characters"):
+        main.create_app()

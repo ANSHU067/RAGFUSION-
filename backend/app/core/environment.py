@@ -43,7 +43,7 @@ class SecurityEnvironment:
 
     @property
     def production(self) -> bool:
-        return self.environment.lower() in {"production", "prod"}
+        return self.environment.strip().lower() in {"production", "prod"}
 
     @classmethod
     def from_environment(cls) -> "SecurityEnvironment":
@@ -79,13 +79,14 @@ class SecurityEnvironment:
         errors: list[str] = []
         if self.jwt_algorithm not in {"HS256", "RS256"}:
             errors.append("RAGFUSION_JWT_ALGORITHM must be HS256 or RS256")
-        if (
-            self.production
-            and self.jwt_secret in {"", "change-me-in-production"}
-            and self.jwt_algorithm == "HS256"
+        secret = self.jwt_secret.strip()
+        if self.production and (
+            len(secret) < 32
+            or secret.lower() in {"change-me-in-production", "your-secret-key", "changeme"}
         ):
             errors.append(
-                "RAGFUSION_JWT_SECRET_KEY must be set to a strong secret in production"
+                "RAGFUSION_JWT_SECRET_KEY must contain at least 32 characters "
+                "and must not be a default placeholder in production"
             )
         if self.jwt_algorithm == "RS256" and (
             not self.jwt_private_key or not self.jwt_public_key
