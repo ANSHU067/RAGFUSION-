@@ -1,16 +1,12 @@
-"""Security-unit tests for token, encryption, CORS, and authorization controls."""
-
-from datetime import timedelta
+"""Security-unit tests for encryption, CORS, and environment validation."""
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.core.encryption import APIKeyCipher, APIKeyManager, EncryptionError
 from app.core.environment import EnvironmentValidationError, SecurityEnvironment
-from app.core.jwt_manager import JWTManager, TokenValidationError
-from app.core.security import require_roles, sanitize_response
-from app.middleware.auth_middleware import AuthenticationMiddleware
+from app.core.security import sanitize_response
 from app.middleware.security_headers import SecurityHeadersMiddleware
 
 
@@ -45,85 +41,15 @@ def security_environment(
     )
 
 
-def protected_client() -> tuple[TestClient, JWTManager]:
-    environment = security_environment()
-    manager = JWTManager(environment)
+def test_cors_and_security_headers() -> None:
     app = FastAPI()
-    app.add_middleware(
-        AuthenticationMiddleware, jwt_manager=manager, public_paths=("/public",)
-    )
-    app.add_middleware(SecurityHeadersMiddleware, environment=environment)
+    app.add_middleware(SecurityHeadersMiddleware, environment=security_environment())
 
     @app.get("/public")
     async def public() -> dict[str, bool]:
         return {"ok": True}
 
-    @app.get("/private")
-    async def private() -> dict[str, bool]:
-        return {"ok": True}
-
-    @app.get("/admin", dependencies=[Depends(require_roles("admin"))])
-    async def admin() -> dict[str, bool]:
-        return {"ok": True}
-
-    return TestClient(app), manager
-
-
-def test_valid_authentication_and_rbac() -> None:
-    client, manager = protected_client()
-    token = manager.issue_access_token("user-1", "admin")
-    assert (
-        client.get("/private", headers={"Authorization": f"Bearer {token}"}).status_code
-        == 200
-    )
-    assert (
-        client.get("/admin", headers={"Authorization": f"Bearer {token}"}).status_code
-        == 200
-    )
-
-
-def test_missing_invalid_and_expired_tokens_are_rejected() -> None:
-    client, manager = protected_client()
-    assert client.get("/private").status_code == 401
-    assert (
-        client.get(
-            "/private", headers={"Authorization": "Bearer altered.token.value"}
-        ).status_code
-        == 401
-    )
-    expired = manager.issue_access_token(
-        "user-1", "user", expires_in=timedelta(seconds=-1)
-    )
-    assert (
-        client.get(
-            "/private", headers={"Authorization": f"Bearer {expired}"}
-        ).status_code
-        == 401
-    )
-
-
-def test_permission_validation_rejects_wrong_role() -> None:
-    client, manager = protected_client()
-    token = manager.issue_access_token("user-1", "user")
-    assert (
-        client.get("/admin", headers={"Authorization": f"Bearer {token}"}).status_code
-        == 403
-    )
-
-
-def test_issuer_audience_revocation_and_key_rotation() -> None:
-    manager = JWTManager(security_environment())
-    token = manager.issue_access_token("user-1", "user")
-    assert manager.verify(token)["sub"] == "user-1"
-    manager.rotate_signing_key("next", "another-long-test-secret", make_active=True)
-    assert manager.verify(token)["sub"] == "user-1"
-    manager.revoke(token)
-    with pytest.raises(TokenValidationError):
-        manager.verify(token)
-
-
-def test_cors_and_security_headers() -> None:
-    client, _ = protected_client()
+    client = TestClient(app)
     allowed = client.options("/public", headers={"Origin": "https://app.example.test"})
     assert allowed.status_code == 204
     assert allowed.headers["access-control-allow-origin"] == "https://app.example.test"

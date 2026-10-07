@@ -9,8 +9,6 @@ from typing import Any, TypeVar
 
 from fastapi import HTTPException, Request, status
 
-from app.core.jwt_manager import JWTManager, TokenValidationError
-
 logger = logging.getLogger("app.security")
 T = TypeVar("T")
 _SENSITIVE = re.compile(
@@ -64,12 +62,3 @@ def require_roles(*roles: str) -> Callable[[Request], Awaitable[dict[str, Any]]]
         return claims
 
     return dependency
-
-
-def verify_bearer_token(token: str, manager: JWTManager) -> dict[str, Any]:
-    try:
-        return manager.verify(token)
-    except TokenValidationError as exc:
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "Invalid or expired authentication token"
-        ) from exc
