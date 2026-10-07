@@ -3,9 +3,10 @@ import { motion } from 'framer-motion'
 import { ArrowRight, Check, Sparkles } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
-import { ComparisonStats, FeaturesAndBento, FinalCta, PricingSection, ProductPreview, TechCloud, UseCasesPricingFaq, WorkflowPipeline } from '@/components/common'
+import { ComparisonStats, FeaturesAndBento, FinalCta, ProductPreview, TechCloud, UseCasesPricingFaq, WorkflowPipeline } from '@/components/common/LandingSections'
+import { PricingSection } from '@/components/landing/PricingSection'
 
-const HeroScene = lazy(() => import('@/components/common/HeroScene').then(({ HeroScene: Scene }) => ({ default: Scene })))
+const HeroScene = lazy(() => import('../components/common/HeroScene'))
 
 const sourceTypes = [
   { icon: '📄', label: 'Documents' },

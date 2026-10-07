@@ -5,6 +5,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 export function ChatWindow({ 
   children, 
   className, 
+  contentClassName,
   autoScroll = true,
   onScrollEnd 
 }) {
@@ -29,7 +30,7 @@ export function ChatWindow({
       className={cn('flex-1 h-full w-full', className)}
       onScroll={onScrollEnd}
     >
-      <div className="flex flex-col gap-4 p-4">
+      <div className={cn('flex flex-col gap-4 p-4', contentClassName)}>
         {children}
         <div ref={endRef} />
       </div>

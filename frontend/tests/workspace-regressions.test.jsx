@@ -10,6 +10,7 @@ import { chatApi } from '../src/services/chat'
 import { websiteApi } from '../src/services/website'
 import { dashboardApi } from '../src/services/dashboard'
 import { clearSession } from '../src/services/session'
+import { ChatBubble } from '../src/components/chat'
 
 vi.mock('../src/context/AuthContext', () => ({ useAuth: () => ({ user: { id: 'owner', display_name: 'Ada Stone' }, loading: false }) }))
 vi.mock('../src/context/ThemeContext', () => ({ useTheme: () => ({ theme: 'light', resolvedTheme: 'light' }) }))
@@ -18,14 +19,14 @@ vi.mock('../src/services/website', () => ({ websiteApi: { list: vi.fn(), create:
 vi.mock('../src/services/dashboard', () => ({ dashboardApi: { overview: vi.fn() } }))
 vi.mock('../src/components/chat', () => ({
   ChatWindow: ({ children }) => <div>{children}</div>,
-  ChatBubble: ({ message }) => <div><p>{message.content}</p><time dateTime={message.created_at} /></div>,
+  ChatBubble: vi.fn(({ message }) => <div><p>{message.content}</p><time dateTime={message.created_at} /></div>),
   TypingIndicator: () => <p>Generating</p>,
   PromptInput: ({ value, onChange, onSubmit, disabled }) => <form onSubmit={(event) => { event.preventDefault(); onSubmit(value) }}><input aria-label="Message" value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled} /><button disabled={disabled}>Send</button></form>,
 }))
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done }); return { promise, resolve } }
 const history = (id, content) => ({ session: { id }, messages: [{ id: id + '-message', role: 'assistant', content, created_at: '2026-10-06T00:00:00Z' }] })
 function Workspace({ initial = '/chat/a' }) {
-  return <MemoryRouter initialEntries={[initial]}><ChatProvider><nav><Link to="/documents">Documents</Link><Link to="/chat">Back to chat</Link><Link to="/chat/b">Other session</Link></nav><Routes><Route path="/documents" element={<h1>Documents page</h1>} /><Route path="/chat" element={<ChatPage />} /><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes></ChatProvider></MemoryRouter>
+  return <MemoryRouter initialEntries={[initial]}><ChatProvider><nav><Link to="/documents">Documents</Link><Link to="/chat">Back to chat</Link><Link to="/chat/a">First session</Link><Link to="/chat/b">Other session</Link></nav><Routes><Route path="/documents" element={<h1>Documents page</h1>} /><Route path="/chat" element={<ChatPage />} /><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes></ChatProvider></MemoryRouter>
 }
 beforeEach(() => {
   clearSession(); localStorage.setItem('access_token', 'valid')
@@ -36,6 +37,54 @@ beforeEach(() => {
   websiteApi.list.mockResolvedValue({ items: [], total: 0 })
 })
 afterEach(cleanup)
+
+test('typing updates only the composer without remapping the conversation', async () => {
+  render(<Workspace />)
+  await screen.findByText('History a')
+  await screen.findByRole('option', { name: 'website · Public article' })
+  const renders = ChatBubble.mock.calls.length
+  const input = screen.getByLabelText('Message')
+  for (const value of ['H', 'He', 'Hello']) fireEvent.change(input, { target: { value } })
+  expect(input.value).toBe('Hello')
+  // This mock is deliberately not memoized: any page/context update calls it.
+  expect(ChatBubble).toHaveBeenCalledTimes(renders)
+})
+
+test('each cached conversation retains its own draft', async () => {
+  render(<Workspace />)
+  await screen.findByText('History a')
+  fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Draft a' } })
+  fireEvent.click(screen.getByText('Other session'))
+  await screen.findByText('History b')
+  expect(screen.getByLabelText('Message').value).toBe('')
+  fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Draft b' } })
+  fireEvent.click(screen.getByText('First session'))
+  await screen.findByText('History a')
+  expect(screen.getByLabelText('Message').value).toBe('Draft a')
+  fireEvent.click(screen.getByText('Other session'))
+  await screen.findByText('History b')
+  expect(screen.getByLabelText('Message').value).toBe('Draft b')
+  expect(chatApi.getSession).toHaveBeenCalledTimes(2)
+})
+
+test('a failed send restores the isolated draft and existing history', async () => {
+  chatApi.sendMessage.mockRejectedValue(new Error('offline'))
+  render(<Workspace />)
+  await screen.findByText('History a')
+  fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Retry this question' } })
+  fireEvent.click(screen.getByText('Send'))
+  await screen.findByText('Unable to send your message. Your conversation has been preserved.')
+  expect(screen.getByLabelText('Message').value).toBe('Retry this question')
+  expect(screen.getByText('History a')).toBeDefined()
+  fireEvent.click(screen.getByText('Dismiss'))
+  expect(screen.getByLabelText('Message').disabled).toBe(false)
+})
+
+test('suggested prompts populate the isolated composer', async () => {
+  render(<Workspace initial="/chat" />)
+  fireEvent.click(screen.getByText('What are the key themes?'))
+  expect(screen.getByLabelText('Message').value).toBe('What are the key themes?')
+})
 
 test('navigation preserves conversation and unsent draft without another history fetch', async () => {
   render(<Workspace />)

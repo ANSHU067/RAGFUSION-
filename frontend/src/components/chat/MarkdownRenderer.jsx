@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { memo, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
@@ -63,23 +63,27 @@ const components = {
   del: ({ children, ...props }) => <del className="line-through" {...props}>{children}</del>,
 }
 
-export function MarkdownRenderer({ 
+const remarkPlugins = [remarkGfm]
+const rehypePlugins = [rehypeHighlight]
+
+export const MarkdownRenderer = memo(function MarkdownRenderer({
   content, 
   className,
   components: customComponents 
 }) {
+  const renderers = useMemo(() => customComponents ? { ...components, ...customComponents } : components, [customComponents])
   return (
     <div className={cn('prose prose-sm dark:prose-invert max-w-none', className)}>
       <ReactMarkdown
-        components={{ ...components, ...customComponents }}
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        components={renderers}
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={rehypePlugins}
       >
         {content}
       </ReactMarkdown>
     </div>
   )
-}
+})
 
 export function InlineMarkdown({ content }) {
   return (

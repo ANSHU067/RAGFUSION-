@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { memo, useCallback } from 'react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Copy, Loader2, RotateCcw, ThumbsDown, ThumbsUp } from 'lucide-react'
@@ -6,7 +6,9 @@ import { MarkdownRenderer } from './MarkdownRenderer'
 import { TokenCounter } from './TokenCounter'
 import { MessageTimestamp } from './MessageTimestamp'
 
-export function ChatBubble({ 
+// Conversation updates preserve unchanged message objects, so shallow comparison
+// skips existing bubbles while still rendering changed content and citations.
+export const ChatBubble = memo(function ChatBubble({
   message, 
   isStreaming = false,
   onRegenerate,
@@ -17,6 +19,7 @@ export function ChatBubble({
   const isUser = role === 'user'
   const isAssistant = role === 'assistant'
   const isError = status === 'error'
+  const copyResponse = useCallback(() => onCopy?.(content), [onCopy, content])
 
   const uniqueCitations = [...new Map(
     (citations || []).map((citation, index) => [
@@ -46,7 +49,7 @@ export function ChatBubble({
   }
 
   return (
-    <article className={cn('mx-auto flex w-full max-w-3xl px-1 sm:px-2', isUser ? 'justify-end' : 'justify-start')}>
+    <article className={cn('flex w-full', isUser ? 'justify-end' : 'justify-start')}>
       <div className={cn('flex min-w-0 max-w-[min(88%,42rem)] flex-col', isUser ? 'items-end' : 'items-start')}>
         <div 
           className={cn(
@@ -97,7 +100,7 @@ export function ChatBubble({
             )}
 
             {isAssistant && <div className="flex items-center gap-0.5">
-              <Button variant="ghost" size="icon" className="size-8 rounded-full text-muted-foreground hover:text-foreground" aria-label="Copy response" onClick={() => onCopy?.(content)}><Copy className="size-3.5" /></Button>
+              <Button variant="ghost" size="icon" className="size-8 rounded-full text-muted-foreground hover:text-foreground" aria-label="Copy response" onClick={copyResponse}><Copy className="size-3.5" /></Button>
               <Button variant="ghost" size="icon" className="size-8 rounded-full text-muted-foreground hover:text-foreground" aria-label="Good response" title="Feedback is unavailable" disabled><ThumbsUp className="size-3.5" /></Button>
               <Button variant="ghost" size="icon" className="size-8 rounded-full text-muted-foreground hover:text-foreground" aria-label="Poor response" title="Feedback is unavailable" disabled><ThumbsDown className="size-3.5" /></Button>
               {onRegenerate && <Button variant="ghost" size="icon" className="size-8 rounded-full text-muted-foreground hover:text-foreground" aria-label="Regenerate response" onClick={onRegenerate}><RotateCcw className="size-3.5" /></Button>}
@@ -121,4 +124,4 @@ export function ChatBubble({
       </div>
     </article>
   )
-}
+})

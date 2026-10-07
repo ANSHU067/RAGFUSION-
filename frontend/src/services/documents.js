@@ -7,7 +7,6 @@ export const documentsApi = {
   async list(params = {}, config = {}) { const { data } = await api.get('/documents', { ...config, params }); return data },
   async get(documentId) { const { data } = await api.get(`/documents/${documentId}`); return data },
   async remove(documentId, config = {}) { const { data } = await api.delete(`/documents/${documentId}`, config); return data },
-  async getStatus(documentId) { const { data } = await api.get(`/documents/${documentId}/status`); return data },
   async process(documentId, params = {}, config = {}) { const { data } = await api.post(`/documents/${documentId}/reprocess`, null, { ...config, params }); return data },
 }
 

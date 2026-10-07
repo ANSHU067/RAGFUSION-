@@ -1,10 +1,10 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ChatWindow, ChatBubble, PromptInput, TypingIndicator } from '@/components/chat'
 import { chatApi } from '@/services/chat'
 import { getApiError, isCanceled } from '@/services/api'
 import { Button } from '@/components/ui/button'
-import { useChat } from '@/context/ChatContext'
+import { useChat, useChatDraft } from '@/context/ChatContext'
 
 const quickPrompts = [
   'Summarize my indexed sources',
@@ -12,6 +12,11 @@ const quickPrompts = [
   'Find important action items',
 ]
 const layoutWidthClass = 'mx-auto w-full max-w-3xl px-4'
+
+function ChatComposer(props) {
+  const { draft, setDraft } = useChatDraft()
+  return <PromptInput {...props} value={draft} onChange={setDraft} />
+}
 
 export default function ChatPage() {
   const chat = useChat()
@@ -42,11 +47,12 @@ export default function ChatPage() {
     })
     return () => controller.abort()
   }, [requestedSource, setSource])
-  const newChat = () => { startNewChat(); navigate('/chat', { replace: true }) }
+  const newChat = useCallback(() => { startNewChat(); navigate('/chat', { replace: true }) }, [startNewChat, navigate])
+  const copyMessage = useCallback(async (content) => {
+    try { await navigator.clipboard.writeText(content) } catch { /* Clipboard permission can be denied. */ }
+  }, [])
   const showEmptyHero = !chat.loading && chat.messages.length === 0 && !chat.error
-  const promptInput = <PromptInput
-    value={chat.draft}
-    onChange={chat.setDraft}
+  const promptInput = <ChatComposer
     onSubmit={chat.sendMessage}
     disabled={chat.loading || chat.sending || !!chat.error}
     autoFocus={showEmptyHero}
@@ -78,9 +84,9 @@ export default function ChatPage() {
           </div>
         </div>
       </section> : <>
-        <ChatWindow className="min-h-0"><div className={`${layoutWidthClass} space-y-6 py-2`}>
+        <ChatWindow className="min-h-0" contentClassName="px-0"><div className={`${layoutWidthClass} space-y-6 py-2`}>
           {chat.loading && <p role="status" className="py-12 text-center text-sm text-muted-foreground">Loading conversation…</p>}
-          {chat.messages.map((message) => <ChatBubble key={message.id} message={message} onCopy={async (content) => { try { await navigator.clipboard.writeText(content) } catch { /* Clipboard permission can be denied. */ } }} />)}
+          {chat.messages.map((message) => <ChatBubble key={message.id} message={message} onCopy={copyMessage} />)}
           {chat.sending && <TypingIndicator variant="minimal" />}
         </div></ChatWindow>
         <div className="sticky bottom-0 z-10 w-full bg-background/80 py-2 backdrop-blur-md"><div className={layoutWidthClass}><div className="rounded-[1.75rem] border border-border/80 bg-background/80 p-2 shadow-lg">{promptInput}</div></div></div>

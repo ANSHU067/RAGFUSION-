@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useRef, useCallback, useEffect } from 'react'
+import { createContext, useContext, useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { chatApi } from '@/services/chat'
 import { useAsyncScope } from '@/hooks/useAsyncScope'
 import { useAuth } from './AuthContext'
@@ -6,13 +6,22 @@ import { ACCESS_TOKEN_KEY, getApiError, isCanceled } from '@/services/api'
 import { getAuthSessionVersion, isCurrentSession } from '@/services/session'
 
 const ChatContext = createContext(null)
-const emptyConversation = () => ({ id: null, messages: [], draft: '', source: '', loading: false, sending: false, error: '' })
+const ChatDraftContext = createContext(null)
+const emptyConversation = () => ({ id: null, messages: [], source: '', loading: false, sending: false, error: '' })
 
 // The account-keyed provider lives above the router. Route unmounts preserve it.
 export function ChatProvider({ children }) {
   const [conversation, setConversation] = useState(emptyConversation)
   const current = useRef(conversation)
   const cache = useRef(new Map())
+  const [draft, setDraftState] = useState('')
+  const draftRef = useRef('')
+  const draftCache = useRef(new Map())
+  const setDraft = useCallback((value) => {
+    draftRef.current = value
+    draftCache.current.set(current.current.id, value)
+    setDraftState(value)
+  }, [])
   const operation = useRef(null)
   const epoch = useRef(0)
   const [chatHistory, setChatHistory] = useState([])
@@ -51,7 +60,8 @@ export function ChatProvider({ children }) {
     const previous = current.current
     if (previous.id && (previous.sending || previous.loading)) cache.current.delete(previous.id)
     publish(emptyConversation())
-  }, [cancelOperation, publish])
+    setDraft('')
+  }, [cancelOperation, publish, setDraft])
   useEffect(() => {
     window.addEventListener('new-chat', startNewChat)
     return () => window.removeEventListener('new-chat', startNewChat)
@@ -63,12 +73,13 @@ export function ChatProvider({ children }) {
     if (current.current.id && (current.current.sending || current.current.loading)) cache.current.delete(current.current.id)
     cancelOperation()
     const saved = refresh ? null : cache.current.get(id)
-    if (saved) { publish(saved); return Promise.resolve(saved) }
+    if (saved) { publish(saved); setDraft(draftCache.current.get(id) || ''); return Promise.resolve(saved) }
     const controller = new AbortController()
     const version = getAuthSessionVersion()
     const requestEpoch = epoch.current
     const active = () => !controller.signal.aborted && requestEpoch === epoch.current && isCurrentSession(version)
     publish({ ...emptyConversation(), id, loading: true })
+    setDraft(draftCache.current.get(id) || '')
     const promise = chatApi.getSession(id, { signal: controller.signal }).then((data) => {
       if (active()) publish({ ...emptyConversation(), ...data.session, messages: data.messages || [] })
       return data
@@ -80,7 +91,7 @@ export function ChatProvider({ children }) {
     })
     operation.current = { controller, promise }
     return promise
-  }, [authenticated, cancelOperation, publish])
+  }, [authenticated, cancelOperation, publish, setDraft])
 
   const sendMessage = useCallback(async (text) => {
     if (!authenticated() || operation.current || !text.trim() || current.current.loading) return null
@@ -89,8 +100,10 @@ export function ChatProvider({ children }) {
     const requestEpoch = ++epoch.current
     const active = () => !controller.signal.aborted && requestEpoch === epoch.current && isCurrentSession(version)
     const previous = current.current
+    const previousDraft = draftRef.current
     const optimistic = { id: crypto.randomUUID(), role: 'user', content: text.trim(), created_at: new Date().toISOString() }
-    publish({ ...previous, draft: '', messages: [...previous.messages, optimistic], sending: true, error: '' })
+    setDraft('')
+    publish({ ...previous, messages: [...previous.messages, optimistic], sending: true, error: '' })
     const payload = { message: text.trim(), chat_session_id: previous.id, include_sources: true }
     if (previous.source) {
       const [kind, id] = previous.source.split(':')
@@ -109,17 +122,23 @@ export function ChatProvider({ children }) {
       void refreshHistory()
       return data
     } catch (err) {
-      if (active() && !isCanceled(err)) publish({ ...previous, error: getApiError(err, 'Unable to send your message. Your conversation has been preserved.') })
+      if (active() && !isCanceled(err)) {
+        publish({ ...previous, error: getApiError(err, 'Unable to send your message. Your conversation has been preserved.') })
+        setDraft(previousDraft)
+      }
       return null
     } finally {
       if (active()) { operation.current = null; publish({ ...current.current, sending: false }) }
     }
-  }, [authenticated, publish, refreshHistory])
-  const setDraft = useCallback((draft) => publish({ ...current.current, draft }), [publish])
+  }, [authenticated, publish, refreshHistory, setDraft])
   const setSource = useCallback((source) => {
     if (!operation.current) publish({ ...current.current, source })
   }, [publish])
   const clearError = useCallback(() => { publish({ ...current.current, error: '' }); setHistoryError('') }, [publish])
-  return <ChatContext.Provider value={{ ...conversation, currentChat: conversation.id ? conversation : null, currentSessionId: conversation.id, chatHistory, error: conversation.error || historyError, refreshHistory, loadChat, sendMessage, startNewChat, setDraft, setSource, clearError }}>{children}</ChatContext.Provider>
+  // Draft changes notify only the composer, not conversation/history consumers.
+  const chatValue = useMemo(() => ({ ...conversation, currentChat: conversation.id ? conversation : null, currentSessionId: conversation.id, chatHistory, error: conversation.error || historyError, refreshHistory, loadChat, sendMessage, startNewChat, setDraft, setSource, clearError }), [conversation, chatHistory, historyError, refreshHistory, loadChat, sendMessage, startNewChat, setDraft, setSource, clearError])
+  const draftValue = useMemo(() => ({ draft, setDraft }), [draft, setDraft])
+  return <ChatContext.Provider value={chatValue}><ChatDraftContext.Provider value={draftValue}>{children}</ChatDraftContext.Provider></ChatContext.Provider>
 }
 export const useChat = () => useContext(ChatContext)
+export const useChatDraft = () => useContext(ChatDraftContext)

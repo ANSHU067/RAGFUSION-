@@ -1,4 +1,3 @@
-export { HeroScene } from './HeroScene'
 export { FloatingCore } from './FloatingCore'
 export { OrbitingDocuments } from './OrbitingDocuments'
 export { KnowledgeGraph } from './KnowledgeGraph'
