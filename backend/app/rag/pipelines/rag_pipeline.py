@@ -34,6 +34,7 @@ class RAGState(TypedDict):
     embedding: Optional[List[float]]
     retrieved_docs: List[tuple]
     reranked_docs: List[tuple]
+    context_documents: NotRequired[List[tuple]]
     prompt: str
     messages: List[Dict[str, str]]
     history: NotRequired[List[Dict[str, str]]]
@@ -141,6 +142,11 @@ class RAGPipeline:
         relevance_threshold = 1.30
 
         metadata = state.get("metadata", {})
+        requested_k = metadata.get("top_k")
+        if requested_k is None:
+            requested_k = get_rag_config().top_k_retrieval
+        requested_k = int(requested_k)
+        retrieval_errors = []
         authorized_source_ids = metadata.get("authorized_source_ids")
         filter_dict = None
         if authorized_source_ids is not None:
@@ -164,12 +170,10 @@ class RAGPipeline:
             if not clauses:
                 retrieved_docs = []
             elif len(active_types) > 1:
-                # Query each modality before combining candidates.  A large
-                # website can otherwise consume the entire global top-k and
-                # hide relevant document or transcript chunks.
-                requested_k = int(metadata.get("top_k") or 10)
-                per_type_k = max(1, math.ceil(requested_k / len(active_types)))
-                candidates_by_type: dict[str, list[tuple]] = {}
+                # Each modality can fill the entire request. Extra candidates
+                # allow deduplication/authorization checks before the final cut.
+                per_type_k = requested_k * 2
+                retrieved_docs = []
                 for source_type in active_types:
                     type_clauses = []
                     field = field_map[source_type]
@@ -178,33 +182,26 @@ class RAGPipeline:
                             {field: str(source_id)},
                             {"source_id": str(source_id)},
                         ])
-                    candidates_by_type[source_type] = self.retriever.retrieve(
-                        question,
-                        top_k=per_type_k,
-                        filter_dict={"$or": type_clauses},
-                    )
-
-                retrieved_docs = []
-                for index in range(per_type_k):
-                    for source_type in active_types:
-                        candidates = candidates_by_type[source_type]
-                        if index < len(candidates):
-                            retrieved_docs.append(candidates[index])
-                            if len(retrieved_docs) >= requested_k:
-                                break
-                    if len(retrieved_docs) >= requested_k:
-                        break
+                    try:
+                        retrieved_docs.extend(self.retriever.retrieve(
+                            question,
+                            top_k=per_type_k,
+                            filter_dict={"$or": type_clauses},
+                        ) or [])
+                    except Exception:
+                        retrieval_errors.append(source_type)
+                        logger.exception("Retrieval failed for source type %s", source_type)
             else:
                 filter_dict = {"$or": clauses}
                 retrieved_docs = self.retriever.retrieve(
                     question,
-                    top_k=int(metadata.get("top_k") or 10),
+                    top_k=requested_k,
                     filter_dict=filter_dict,
                 )
         else:
             retrieved_docs = self.retriever.retrieve(
                 question,
-                top_k=int(metadata.get("top_k") or 10),
+                top_k=requested_k,
             )
 
         # The legacy collection also contains document records that predate
@@ -221,30 +218,22 @@ class RAGPipeline:
         # YouTube chunks, and merge the results without changing document or
         # website retrieval.
         if user_id and is_youtube_question and authorized_source_ids is None:
-            youtube_docs = self.retriever.retrieve(
-                question,
-                top_k=10,
-                filter_dict={
-                    "$and": [
-                        {"source_type": "youtube"},
-                        {"user_id": user_id},
-                    ]
-                },
-            )
-            merged_docs = youtube_docs + retrieved_docs
-            seen = set()
-            deduplicated_docs = []
-            for doc in merged_docs:
-                document_key = (
-                    doc[2].get("source_id"),
-                    doc[2].get("chunk_index"),
-                    doc[2].get("chunk_idx"),
-                    doc[0],
+            try:
+                youtube_docs = self.retriever.retrieve(
+                    question,
+                    top_k=requested_k,
+                    filter_dict={
+                        "$and": [
+                            {"source_type": "youtube"},
+                            {"user_id": user_id},
+                        ]
+                    },
                 )
-                if document_key not in seen:
-                    seen.add(document_key)
-                    deduplicated_docs.append(doc)
-            retrieved_docs = deduplicated_docs
+            except Exception:
+                retrieval_errors.append("youtube")
+                logger.exception("Supplemental YouTube retrieval failed")
+                youtube_docs = []
+            retrieved_docs = (youtube_docs or []) + retrieved_docs
 
         if user_id:
             retrieved_docs = [
@@ -268,6 +257,23 @@ class RAGPipeline:
                 for doc in retrieved_docs
                 if self._is_authorized_source(doc[2], authorized_source_ids)
             ]
+
+        # Chroma returns distances, so lower scores win across modalities.
+        # Deduplicate and discard empty chunks before consuming the final quota.
+        unique_docs = []
+        seen = set()
+        for doc in sorted(retrieved_docs, key=lambda item: float(item[1])):
+            if (
+                not isinstance(doc[0], str)
+                or not doc[0].strip()
+                or not math.isfinite(float(doc[1]))
+            ):
+                continue
+            key = PromptBuilder.chunk_id(doc[0], doc[2])
+            if key not in seen:
+                seen.add(key)
+                unique_docs.append(doc)
+        retrieved_docs = unique_docs[:requested_k]
 
         logger.info(
             "[RAG DEBUG] chunks_before_context=%d; chunk_content_lengths=%s; "
@@ -352,6 +358,7 @@ class RAGPipeline:
                 "best_retrieval_distance": best_score,
                 "rag_context_used": bool(retrieved_docs),
                 "retrieval": retrieval_metadata,
+                "retrieval_errors": retrieval_errors,
             },
         }
 
@@ -443,25 +450,23 @@ class RAGPipeline:
             for doc in reranked_docs
         ]
 
-        # Build messages for chat model
+        # Pack once so the model, diagnostics, and citations share one result.
+        packed = self.prompt_builder.pack_context(context_docs)
         messages = self.prompt_builder.build_rag_messages(
             question=question,
             context_documents=context_docs,
             include_metadata=True,
             include_scores=False,
+            packed_context=packed,
         )
 
         # Also build string prompt for logging
         prompt = self.prompt_builder.build_rag_prompt(
-            question=question, context_documents=context_docs
+            question=question, context_documents=context_docs, packed_context=packed,
         )
 
-        # The prompt builder enforces its own maximum context length. Measure
-        # the context actually embedded in the prompt rather than every
-        # retrieved chunk offered to it.
-        prompt_context = prompt.partition("Context:\n")[2].partition("\n\nQuestion:")[0]
-        context_chunk_count = prompt_context.count("\nDocument ")
-        context_length = len(prompt_context)
+        context_chunk_count = len(packed.documents)
+        context_length = len(packed.text)
         context_sources = [
             {
                 "source_type": doc[2].get("source_type", "document"),
@@ -471,7 +476,7 @@ class RAGPipeline:
                 or doc[2].get("youtube_source_id"),
                 "content_length": len(doc[0]),
             }
-            for doc in context_docs[:context_chunk_count][:3]
+            for doc in packed.documents[:3]
         ]
         logger.info(
             "[RAG] Context length: %d characters across %d chunks",
@@ -485,7 +490,17 @@ class RAGPipeline:
         )
         logger.info("[RAG DEBUG] final_context_length=%d", context_length)
 
-        return {**state, "messages": messages, "prompt": prompt}
+        return {
+            **state, "messages": messages, "prompt": prompt,
+            "context_documents": packed.documents,
+            "metadata": {
+                **state.get("metadata", {}),
+                "included_chunk_ids": packed.chunk_ids,
+                "context_chunk_count": context_chunk_count,
+                "context_length": context_length,
+                "rag_context_used": bool(packed.documents),
+            },
+        }
 
     def _generate_response(self, state: RAGState) -> RAGState:
         """Generate response using LLM."""
@@ -578,7 +593,7 @@ class RAGPipeline:
         return {
             "question": final_state["question"],
             "response": final_state["response"],
-            "context_documents": final_state["reranked_docs"],
+            "context_documents": final_state.get("context_documents", []),
             "metadata": final_state["metadata"],
         }
 

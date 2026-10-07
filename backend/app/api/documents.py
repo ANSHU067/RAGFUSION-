@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user_id as get_current_user
 from app.config.settings import get_settings
+from app.core.ingestion_limits import UPLOAD_READ_BYTES, document_size_limit
 from app.db.session import get_db_session
 from app.models.entities import Document, SourceStatus, User
 from app.schemas.document import (
@@ -46,6 +47,7 @@ from app.services.document import (
     process_document,
     upload_document,
     resolve_storage_key,
+    delete_stored_document,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,7 +70,7 @@ router = APIRouter(prefix="/documents", tags=["documents"])
     - CSV (text/csv)
     - Markdown (text/markdown, text/x-markdown)
 
-    Maximum file size: 100MB
+    Maximum file size: 15 MiB. Text documents must be UTF-8 encoded.
 
     The document will be processed asynchronously through the pipeline:
     validation -> cleaning -> chunking -> embedding -> storage
@@ -104,15 +106,20 @@ async def upload_document_route(
         strategy=chunking_strategy,
     )
 
-    # Validate file size
-    if file.size and file.size > settings.max_file_size_mb * 1024 * 1024:
+    # The middleware bounds the body before multipart parsing. Independently
+    # enforce the per-file limit, including missing or incorrect size metadata.
+    limit = document_size_limit(settings.max_file_size_mb)
+    if file.size is not None and file.size > limit:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File size exceeds maximum of {settings.max_file_size_mb}MB",
+            detail=f"File size exceeds maximum of {limit} bytes",
         )
 
-    # Read file content
-    content = await file.read()
+    content = bytearray()
+    while block := await file.read(min(UPLOAD_READ_BYTES, limit + 1 - len(content))):
+        content.extend(block)
+        if len(content) > limit:
+            raise HTTPException(status_code=413, detail="File exceeds maximum size")
     if not content:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -173,7 +180,7 @@ async def upload_document_route(
 
     except DocumentValidationError as e:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=413 if e.code in {"FILE_TOO_LARGE", "TOO_MANY_CHUNKS", "EXTRACTION_LIMIT"} else 400,
             detail="Document validation failed",
         )
     except DocumentProcessingError as e:
@@ -328,7 +335,7 @@ async def delete_document(
     query = select(Document).where(
         Document.id == document_id,
         Document.user_id == current_user.id,
-    )
+    ).with_for_update()
     result = await db.execute(query)
     document = result.scalar_one_or_none()
 
@@ -338,18 +345,13 @@ async def delete_document(
             detail="Document not found",
         )
 
-    # Delete file from storage
-    settings = get_settings()
     try:
-        file_path = resolve_storage_key(Path(settings.upload_dir), document.storage_key)
+        await delete_stored_document(db, document)
     except DocumentValidationError as exc:
         raise HTTPException(status_code=400, detail="Invalid document storage location") from exc
-    if file_path.exists():
-        resolve_storage_key(Path(settings.upload_dir), document.storage_key).unlink()
-
-    # Delete document (cascades to embeddings)
-    await db.delete(document)
-    await db.commit()
+    except DocumentProcessingError as exc:
+        logger.exception("Document deletion failed")
+        raise HTTPException(status_code=503, detail="Document deletion failed; retry later") from exc
 
     return DocumentResponse(
         id=document.id,
@@ -434,6 +436,11 @@ async def reprocess_document(
             status=safe_document_status(persisted.status),
             message="Document reprocessed successfully.",
         )
+    except DocumentValidationError as exc:
+        raise HTTPException(
+            status_code=413 if exc.code in {"FILE_TOO_LARGE", "TOO_MANY_CHUNKS", "EXTRACTION_LIMIT"} else 400,
+            detail="Document validation failed",
+        ) from exc
     except DocumentProcessingError as e:
         logger.exception("Document processing failed")
         raise HTTPException(

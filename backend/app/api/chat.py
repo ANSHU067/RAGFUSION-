@@ -58,7 +58,9 @@ async def get_chat_service(
     current_user: UserResponse = Depends(get_current_user_id),
 ) -> ChatService:
     """Dependency to get chat service."""
-    settings = await SettingsRepository(db).get_or_create(current_user.id)
+    # Reading chat preferences must not create a row whose schema defaults
+    # would mask application defaults for a user with no saved settings.
+    settings = await SettingsRepository(db).get_by_user_id(current_user.id)
     pipeline = request.app.state.rag_pipeline
     pipeline_error = getattr(request.app.state, "rag_pipeline_error", None)
     if pipeline is None:
@@ -77,10 +79,11 @@ async def get_chat_service(
         db=db,
         user_id=current_user.id,
         rag_pipeline=pipeline,
-        model_name=settings.model_name,
-        provider=settings.provider.value,
-        configured_temperature=settings.temperature,
-        configured_max_tokens=settings.max_tokens,
+        model_name=settings.model_name if settings else None,
+        provider=settings.provider.value if settings else None,
+        configured_temperature=settings.temperature if settings else None,
+        configured_max_tokens=settings.max_tokens if settings else None,
+        configured_top_k=settings.top_k if settings else None,
         pipeline_error=pipeline_error,
     )
 
@@ -120,7 +123,7 @@ async def chat(
             session_id=request.session_id,
             max_tokens=request.max_tokens,
             temperature=request.temperature,
-            top_k=request.top_k or 5,
+            top_k=request.top_k,
             include_sources=request.include_sources,
         )
 
@@ -181,7 +184,7 @@ async def chat_stream(
                 session_id=request.session_id,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
-                top_k=request.top_k or 5,
+                top_k=request.top_k,
                 include_sources=request.include_sources,
             ):
                 if await http_request.is_disconnected():

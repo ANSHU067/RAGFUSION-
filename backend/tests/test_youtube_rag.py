@@ -191,8 +191,8 @@ def test_video_query_merges_authorized_youtube_results():
     )
 
     assert [document[0] for document in result["retrieved_docs"]] == [
-        "YouTube transcript context",
         "document context",
+        "YouTube transcript context",
     ]
     assert pipeline.retriever.retrieve.call_args_list[1].kwargs["filter_dict"] == {
         "$and": [

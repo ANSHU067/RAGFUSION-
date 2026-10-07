@@ -4,8 +4,23 @@ This module handles prompt engineering and context formatting for RAG pipelines.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+import hashlib
+import json
 
 from app.core.rag_config import get_rag_config
+
+
+@dataclass(frozen=True)
+class PackedContext:
+    """The exact context and chunk identities accepted for one request."""
+
+    text: str
+    documents: List[Tuple[str, float, Dict]]
+
+    @property
+    def chunk_ids(self) -> List[str]:
+        return [document[2]["chunk_id"] for document in self.documents]
 
 
 class PromptBuilder:
@@ -24,7 +39,7 @@ class PromptBuilder:
         """
         rag_config = get_rag_config()
 
-        self.max_context_length = max_context_length or rag_config.max_context_length
+        self.max_context_length = rag_config.max_context_length if max_context_length is None else max_context_length
         self.system_prompt = system_prompt or self._default_system_prompt()
 
     def _default_system_prompt(self) -> str:
@@ -90,12 +105,67 @@ Your responsibilities:
             parts.append(f"filename={filename}")
         return ", ".join(parts)
 
+    @staticmethod
+    def chunk_id(text: str, metadata: Dict[str, Any]) -> str:
+        """Retain explicit IDs, or derive a stable ID for legacy vector records."""
+        if metadata.get("chunk_id") is not None:
+            return str(metadata["chunk_id"])
+        identity = {key: metadata.get(key) for key in (
+            "source_type", "source_id", "document_id", "website_id",
+            "youtube_source_id", "chunk_index", "chunk_idx",
+        )}
+        identity["text"] = text
+        return hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
+
+    def pack_context(
+        self,
+        context_documents: List[Tuple[str, float, Dict]],
+        include_metadata: bool = True,
+        include_scores: bool = False,
+    ) -> PackedContext:
+        """Pack whole chunks once; oversized chunks do not hide later small ones."""
+        sections = []
+        included = []
+        current_length = 0
+        for text, score, metadata in context_documents:
+            if not text.strip():
+                continue
+            header_parts = [f"Document {len(included) + 1}"]
+            if include_scores:
+                header_parts.append(f"(Relevance: {score:.2f})")
+            if include_metadata and metadata:
+                header_parts.append(f"[Origin: {self._format_origin(metadata)}]")
+            section = f"\n{' '.join(header_parts)}:\n{text}\n"
+            if current_length + len(section) > self.max_context_length:
+                continue
+            sections.append(section)
+            current_length += len(section)
+            included.append((text, score, {**metadata, "chunk_id": self.chunk_id(text, metadata)}))
+        return PackedContext(text="".join(sections), documents=included)
+
+    @staticmethod
+    def _no_context_notice(context_documents, packed: PackedContext) -> str:
+        if packed.documents:
+            return ""
+        if context_documents:
+            return (
+                "\nNo source chunks fit the current context budget. Do not claim "
+                "to have consulted or cite any uploaded sources in this answer.\n"
+            )
+        return (
+            "\nNo current, authorized source chunks were retrieved. If the user asks "
+            "about an uploaded document or source, clearly state that there are "
+            "currently no uploaded documents available to reference. Do not infer "
+            "that a source exists from earlier conversation text.\n"
+        )
+
     def build_rag_prompt(
         self,
         question: str,
         context_documents: List[Tuple[str, float, Dict]],
         include_metadata: bool = True,
         include_scores: bool = False,
+        packed_context: Optional[PackedContext] = None,
     ) -> str:
         """Build a RAG prompt from question and context.
 
@@ -109,37 +179,11 @@ Your responsibilities:
             Formatted prompt string
         """
 
-        # Build context section
-        context_parts = []
-        current_length = 0
-
-        for i, (text, score, metadata) in enumerate(context_documents, 1):
-            # Build document header
-            header_parts = [f"Document {i}"]
-            if include_scores:
-                header_parts.append(f"(Relevance: {score:.2f})")
-            if include_metadata and metadata:
-                header_parts.append(f"[Origin: {self._format_origin(metadata)}]")
-
-            header = " ".join(header_parts)
-            doc_section = f"\n{header}:\n{text}\n"
-
-            # Check length limit
-            if current_length + len(doc_section) > self.max_context_length:
-                break
-
-            context_parts.append(doc_section)
-            current_length += len(doc_section)
-
-        context = "".join(context_parts)
-        no_source_notice = (
-            "\nNo current, authorized source chunks were retrieved. If the user asks "
-            "about an uploaded document or source, clearly state that there are "
-            "currently no uploaded documents available to reference. Do not infer "
-            "that a source exists from earlier conversation text.\n"
-            if not context_documents
-            else ""
+        packed = packed_context if packed_context is not None else self.pack_context(
+            context_documents, include_metadata, include_scores,
         )
+        context = packed.text
+        no_source_notice = self._no_context_notice(context_documents, packed)
 
         # Build full prompt
         prompt = f"""Context:
@@ -166,6 +210,7 @@ answer naturally using your own knowledge.
         include_metadata: bool = True,
         include_scores: bool = False,
         system_prompt: Optional[str] = None,
+        packed_context: Optional[PackedContext] = None,
     ) -> List[Dict[str, str]]:
         """Build messages for chat-based models.
 
@@ -179,36 +224,11 @@ answer naturally using your own knowledge.
         Returns:
             List of message dictionaries
         """
-        # Build context
-        context_parts = []
-        current_length = 0
-
-        for i, (text, score, metadata) in enumerate(context_documents, 1):
-            header_parts = [f"Document {i}"]
-            if include_scores:
-                header_parts.append(f"(Relevance: {score:.2f})")
-            if include_metadata and metadata:
-                header_parts.append(f"[Origin: {self._format_origin(metadata)}]")
-
-            header = " ".join(header_parts)
-            doc_section = f"\n{header}:\n{text}\n"
-
-            if current_length + len(doc_section) > self.max_context_length:
-                break
-
-            context_parts.append(doc_section)
-            current_length += len(doc_section)
-
-        context = "".join(context_parts)
-
-        no_source_notice = (
-            "\nNo current, authorized source chunks were retrieved. If the user asks "
-            "about an uploaded document or source, clearly state that there are "
-            "currently no uploaded documents available to reference. Do not infer "
-            "that a source exists from earlier conversation text.\n"
-            if not context_documents
-            else ""
+        packed = packed_context if packed_context is not None else self.pack_context(
+            context_documents, include_metadata, include_scores,
         )
+        context = packed.text
+        no_source_notice = self._no_context_notice(context_documents, packed)
 
         # Build messages
         messages = [

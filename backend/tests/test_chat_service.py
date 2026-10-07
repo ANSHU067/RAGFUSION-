@@ -22,7 +22,7 @@ class TestChatService:
         mock.graph.invoke = MagicMock(
             return_value={
                 "response": "This is a test response.",
-                "reranked_docs": [
+                "context_documents": [
                     (
                         "Test content snippet",
                         0.95,

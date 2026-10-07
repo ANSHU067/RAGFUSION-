@@ -159,6 +159,42 @@ class RetrieverManager:
 
         return formatted_results
 
+    @staticmethod
+    def document_filter(document_id: str, user_id: str) -> Dict:
+        """Scope destructive operations to a document and its owner."""
+        return {"$and": [{"document_id": document_id}, {"user_id": user_id}]}
+
+    def get_document_vectors(self, document_id: str, user_id: str) -> Dict:
+        return self.client.get_collection(self.collection_name).get(
+            where=self.document_filter(document_id, user_id),
+            include=["documents", "metadatas", "embeddings"],
+        )
+
+    def delete_document_vectors(self, document_id: str, user_id: str) -> None:
+        """Delete every matching chunk, including legacy IDs and old tails."""
+        self.client.get_collection(self.collection_name).delete(
+            where=self.document_filter(document_id, user_id),
+        )
+
+    def upsert_vectors(self, records: Dict) -> None:
+        """Restore a snapshot in bounded batches without re-embedding."""
+        collection = self.client.get_collection(self.collection_name)
+        for start in range(0, len(records["ids"]), 100):
+            collection.upsert(**{
+                key: records[key][start:start + 100]
+                for key in ("ids", "documents", "metadatas", "embeddings")
+                if records.get(key) is not None
+            })
+
+    def add_document_chunks(self, records: Dict) -> None:
+        """Index already bounded chunks with the existing Chroma encoder."""
+        for start in range(0, len(records["ids"]), 100):
+            self.vectorstore.add_texts(
+                texts=records["documents"][start:start + 100],
+                metadatas=records["metadatas"][start:start + 100],
+                ids=records["ids"][start:start + 100],
+            )
+
     def retrieve_with_relevance_scores(
         self, query: str, top_k: Optional[int] = None, score_threshold: float = 0.0
     ) -> List[Tuple[str, float, Dict]]:

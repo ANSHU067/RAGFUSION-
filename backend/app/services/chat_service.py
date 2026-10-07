@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.exceptions import AppException, NotFoundError
+from app.core.rag_config import get_rag_config
 from app.models.entities import (
     Document,
     Embedding,
@@ -54,6 +55,7 @@ class ChatService:
         configured_temperature: float | None = None,
         configured_max_tokens: int | None = None,
         pipeline_error: Exception | None = None,
+        configured_top_k: int | None = None,
     ):
         """Initialize chat service.
 
@@ -78,6 +80,7 @@ class ChatService:
         self.provider = provider
         self.configured_temperature = configured_temperature
         self.configured_max_tokens = configured_max_tokens
+        self.configured_top_k = configured_top_k
         self.pipeline_error = pipeline_error
         self.source_selection: dict[str, list[str]] | None = None
 
@@ -97,13 +100,76 @@ class ChatService:
             self.rag_pipeline = RAGPipeline()
         return self.rag_pipeline
 
+    def _resolve_generation_settings(
+        self,
+        *,
+        temperature: float | None,
+        max_tokens: int | None,
+        top_k: int | None,
+    ) -> dict[str, int | float]:
+        """Resolve request overrides over saved settings over app defaults."""
+        defaults = get_rag_config()
+        return {
+            "temperature": (
+                temperature if temperature is not None
+                else self.configured_temperature if self.configured_temperature is not None
+                else defaults.temperature
+            ),
+            "max_tokens": (
+                max_tokens if max_tokens is not None
+                else self.configured_max_tokens if self.configured_max_tokens is not None
+                else defaults.max_tokens
+            ),
+            "top_k": (
+                top_k if top_k is not None
+                else self.configured_top_k if self.configured_top_k is not None
+                else defaults.top_k_retrieval
+            ),
+        }
+
+    @staticmethod
+    def _build_citations(context_documents: list[tuple]) -> list[dict[str, Any]]:
+        """Project citations only from chunks actually packed into the prompt."""
+        citations = []
+        for content, score, metadata in context_documents:
+            normalized_score = max(0.0, min(1.0, 1.0 / (1.0 + float(score))))
+            source_type = metadata.get("source_type")
+            if source_type not in {"document", "website", "youtube"}:
+                source_type = (
+                    "youtube" if metadata.get("youtube_source_id")
+                    else "website" if metadata.get("website_id")
+                    else "document"
+                )
+            source_id = {
+                "document": metadata.get("document_id"),
+                "website": metadata.get("website_id"),
+                "youtube": metadata.get("youtube_source_id"),
+            }.get(source_type) or metadata.get("source_id")
+            source_label = (
+                metadata.get("title") or metadata.get("filename")
+                or metadata.get("name") or metadata.get("youtube_url")
+                or metadata.get("url") or "Unknown Source"
+            )
+            citations.append({
+                "source_id": source_id,
+                "source_type": source_type,
+                "content": content[:200],
+                "score": normalized_score,
+                "source_name": source_label,
+                "filename": source_label,
+                "title": metadata.get("title") or (source_label if source_type != "document" else None),
+                "url": metadata.get("url") or metadata.get("youtube_url"),
+                "metadata": metadata,
+            })
+        return citations
+
     async def chat(
         self,
         message: str,
         session_id: UUID | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
-        top_k: int = 5,
+        top_k: int | None = None,
         include_sources: bool = True,
     ) -> dict[str, Any]:
         """Process a chat message with RAG.
@@ -208,7 +274,7 @@ class ChatService:
         session_id: UUID | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
-        top_k: int = 5,
+        top_k: int | None = None,
         include_sources: bool = True,
     ) -> AsyncIterator[StreamChunk]:
         """Process a chat message with streaming response.
@@ -326,7 +392,7 @@ class ChatService:
         message: str,
         history: list[dict[str, str]],
         session_id: UUID | None = None,
-        top_k: int = 5,
+        top_k: int | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> dict[str, Any]:
@@ -343,6 +409,12 @@ class ChatService:
             Dict with response, citations, and token_usage
         """
         pipeline = self._get_rag_pipeline()
+        resolved = self._resolve_generation_settings(
+            temperature=temperature, max_tokens=max_tokens, top_k=top_k,
+        )
+        temperature = resolved["temperature"]
+        max_tokens = resolved["max_tokens"]
+        top_k = resolved["top_k"]
 
         # Ready videos created before YouTube RAG indexing was added are
         # mirrored into the existing retriever on their owner's first chat.
@@ -448,44 +520,9 @@ class ChatService:
         # Extract response
         response = result.get("response", "")
 
-        # Extract citations from reranked docs
-        citations = []
-        for doc in result.get("reranked_docs", [])[:top_k]:
-            content, score, metadata = doc
-
-            normalized_score = max(0.0, min(1.0, 1.0 / (1.0 + float(score))))
-            source_type = metadata.get("source_type")
-            if source_type not in {"document", "website", "youtube"}:
-                source_type = (
-                    "youtube" if metadata.get("youtube_source_id")
-                    else "website" if metadata.get("website_id")
-                    else "document"
-                )
-            source_id = {
-                "document": metadata.get("document_id"),
-                "website": metadata.get("website_id"),
-                "youtube": metadata.get("youtube_source_id"),
-            }.get(source_type) or metadata.get("source_id")
-            source_label = (
-                metadata.get("title")
-                or metadata.get("filename")
-                or metadata.get("name")
-                or metadata.get("youtube_url")
-                or metadata.get("url")
-                or "Unknown Source"
-            )
-
-            citations.append({
-                "source_id": source_id,
-                "source_type": source_type,
-                "content": content[:200],
-                "score": normalized_score,
-                "source_name": source_label,
-                "filename": source_label,
-                "title": metadata.get("title") or (source_label if source_type != "document" else None),
-                "url": metadata.get("url") or metadata.get("youtube_url"),
-                "metadata": metadata,
-            })
+        # Only the explicit prompt-packing result is evidence of LLM context.
+        # Never fall back to retrieved/reranked candidates when it is absent.
+        citations = self._build_citations(result.get("context_documents", []))
 
         # Extract token usage if available
         token_usage = result.get("metadata", {}).get("token_usage")
@@ -527,7 +564,7 @@ class ChatService:
         message: str,
         history: list[dict[str, str]],
         session_id: UUID | None = None,
-        top_k: int = 5,
+        top_k: int | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> AsyncIterator[dict[str, Any]]:

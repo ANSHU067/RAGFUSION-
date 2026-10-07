@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     upload_dir: str = Field(
         default_factory=default_upload_dir, description="Directory for uploaded files"
     )
-    max_file_size_mb: int = Field(default=100, description="Maximum file size in MB")
+    max_file_size_mb: int = Field(default=15, gt=0, description="Document size in MiB; hard ceiling 15 MiB")
 
     @field_validator('app_name')
     @classmethod

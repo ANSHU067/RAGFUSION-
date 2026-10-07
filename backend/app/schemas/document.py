@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from app.core.ingestion_limits import MAX_DOCUMENT_BYTES
 
 
 class DocumentFormat(str, enum.Enum):
@@ -39,7 +40,7 @@ class DocumentUploadRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=512)
     content_type: str = Field(..., description="MIME type of the uploaded file")
     size_bytes: int = Field(
-        ..., gt=0, le=100_000_000, description="File size in bytes (max 100MB)"
+        ..., gt=0, le=MAX_DOCUMENT_BYTES, description="File size in bytes (max 15 MiB)"
     )
 
     model_config = ConfigDict(

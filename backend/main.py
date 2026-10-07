@@ -19,6 +19,8 @@ from app.services.async_executor import AsyncExecutor
 from app.middleware.request_context import RequestContextMiddleware
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.core.rate_limiter import RateLimiter, RedisRateLimiter
+from app.core.ingestion_limits import document_size_limit
+from app.middleware.upload_limit import UploadLimitMiddleware
 
 
 def create_app(*, rate_limiter: RateLimiter | None = None) -> FastAPI:
@@ -43,6 +45,11 @@ def create_app(*, rate_limiter: RateLimiter | None = None) -> FastAPI:
     security_environment.validate()
     app.add_middleware(GZipMiddleware, minimum_size=1_000)
     app.add_middleware(PerformanceMiddleware)
+    app.add_middleware(
+        UploadLimitMiddleware,
+        upload_path=f"{settings.api_v1_prefix}/documents/upload",
+        max_file_bytes=document_size_limit(settings.max_file_size_mb),
+    )
     app.add_middleware(
         RateLimitMiddleware, trusted_proxies=tuple(settings.trusted_proxies),
         api_prefix=settings.api_v1_prefix,

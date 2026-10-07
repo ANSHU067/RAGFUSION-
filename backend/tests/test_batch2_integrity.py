@@ -89,7 +89,7 @@ async def owner(database):
 @pytest.fixture
 def storage(database, tmp_path, monkeypatch):
     root = tmp_path / "uploads-root"
-    settings = SimpleNamespace(upload_dir=str(root))
+    settings = SimpleNamespace(upload_dir=str(root), max_file_size_mb=15)
     monkeypatch.setattr(service, "get_settings", lambda: settings)
     monkeypatch.setattr(routes, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "get_session_factory", lambda: database.factory)
@@ -169,7 +169,7 @@ async def test_reprocess_and_delete_block_unsafe_keys_and_other_tenants(database
             assert invalid.value.status_code == 400
         extractor = Mock(side_effect=AssertionError("Unsafe file was read"))
         monkeypatch.setattr(service, "extract_text", extractor)
-        with pytest.raises(service.DocumentProcessingError):
+        with pytest.raises(service.DocumentValidationError):
             await service.process_document(document.id, outside, DocumentFormat.txt, ProcessingConfig())
         extractor.assert_not_called()
         assert outside.read_text() == "protected"

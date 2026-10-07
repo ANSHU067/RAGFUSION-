@@ -64,10 +64,10 @@ class ChatRequest(BaseModel):
         default=None, description="Existing session ID or null for new session",
         validation_alias=AliasChoices('chat_session_id', 'session_id'),
     )
-    max_tokens: int | None = Field(default=2000, ge=100, le=4000)
-    temperature: float | None = Field(default=0.7, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=100, le=4000)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_k: int | None = Field(
-        default=5, ge=1, le=20, description="Number of documents to retrieve"
+        default=None, ge=1, le=20, description="Number of documents to retrieve"
     )
     include_sources: bool = Field(default=True, description="Include source citations")
     stream: bool = Field(default=False, description="Enable streaming response")

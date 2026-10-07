@@ -3,7 +3,11 @@ from __future__ import annotations
 from app.rag.retrievers.retriever_manager import RetrieverManager
 
 import hashlib
+import codecs
+import logging
 import uuid
+import zipfile
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -15,8 +19,14 @@ from pypdf import PdfReader
 from unstructured.cleaners.core import clean
 from unstructured.partition.text import partition_text
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import get_settings
+from app.core.ingestion_limits import (
+    MAX_DOCUMENT_BYTES, MAX_DOCUMENT_CHUNKS, MAX_EXTRACTED_CHARACTERS,
+    MAX_DOCX_EXPANDED_BYTES, MAX_DOCX_ENTRIES, MAX_PDF_PAGES,
+    UPLOAD_READ_BYTES, document_size_limit,
+)
 from app.db.session import get_session_factory
 from app.models.entities import Document, Embedding, SourceStatus
 from app.schemas.document import (
@@ -50,8 +60,9 @@ EXTENSION_TO_FORMAT = {
     ".markdown": DocumentFormat.markdown,
 }
 
-MAX_FILE_SIZE = 100_000_000  # 100MB
+MAX_FILE_SIZE = MAX_DOCUMENT_BYTES
 INGEST_LIMITER = anyio.CapacityLimiter(2)
+logger = logging.getLogger(__name__)
 
 
 class DocumentValidationError(Exception):
@@ -120,7 +131,7 @@ def detect_format(file_path: Path, content_type: str | None = None) -> DocumentF
 
 
 def validate_file(
-    file_path: Path, content_type: str | None, size_bytes: int
+    file_path: Path, content_type: str | None, size_bytes: int | None
 ) -> DocumentFormat:
     """
     Validate uploaded file.
@@ -151,7 +162,7 @@ def validate_file(
             code="FILE_TOO_LARGE",
         )
 
-    if size_bytes != actual_size:
+    if size_bytes is not None and size_bytes != actual_size:
         raise DocumentValidationError(
             f"Size mismatch: expected {size_bytes}, got {actual_size}",
             code="SIZE_MISMATCH",
@@ -169,12 +180,14 @@ def validate_file(
 def _validate_format_specific(file_path: Path, format_: DocumentFormat) -> None:
     """Perform format-specific validation."""
     try:
+        _validate_signature(file_path, format_)
         if format_ == DocumentFormat.pdf:
             # Try to open with both pymupdf and pypdf
-            doc = pymupdf.open(str(file_path))
-            if doc.page_count == 0:
-                raise DocumentValidationError("PDF has no pages", code="EMPTY_PDF")
-            doc.close()
+            with pymupdf.open(str(file_path)) as doc:
+                if doc.page_count == 0:
+                    raise DocumentValidationError("PDF has no pages", code="EMPTY_PDF")
+                if doc.page_count > MAX_PDF_PAGES:
+                    raise DocumentValidationError("PDF has too many pages", code="EXTRACTION_LIMIT")
 
             # Also verify with pypdf
             reader = PdfReader(str(file_path))
@@ -207,8 +220,7 @@ def _validate_format_specific(file_path: Path, format_: DocumentFormat) -> None:
                     dialect = sniffer.sniff(f.read(1024))
                     f.seek(0)
                     reader = csv.reader(f, dialect)
-                    rows = list(reader)
-                    if not rows:
+                    if next(reader, None) is None:
                         raise DocumentValidationError(
                             "CSV has no rows", code="EMPTY_CSV"
                         )
@@ -225,6 +237,52 @@ def _validate_format_specific(file_path: Path, format_: DocumentFormat) -> None:
         )
 
 
+def _validate_signature(file_path: Path, format_: DocumentFormat) -> None:
+    """Inspect bytes before invoking a parser; MIME headers are only a hint."""
+    with file_path.open("rb") as source:
+        header = source.read(16)
+        source.seek(0)
+        if format_ == DocumentFormat.pdf:
+            if not header.startswith(b"%PDF-"):
+                raise DocumentValidationError("Invalid PDF signature", code="INVALID_SIGNATURE")
+        elif format_ == DocumentFormat.docx:
+            if not header.startswith(b"PK\x03\x04"):
+                raise DocumentValidationError("Invalid DOCX signature", code="INVALID_SIGNATURE")
+            with zipfile.ZipFile(source) as archive:
+                entries = archive.infolist()
+                if (len(entries) > MAX_DOCX_ENTRIES
+                        or sum(entry.file_size for entry in entries) > MAX_DOCX_EXPANDED_BYTES):
+                    raise DocumentValidationError("DOCX expansion exceeds limit", code="EXTRACTION_LIMIT")
+                if not {"[Content_Types].xml", "word/document.xml"}.issubset(archive.namelist()):
+                    raise DocumentValidationError("Invalid DOCX structure", code="INVALID_SIGNATURE")
+        else:
+            if header.startswith((b"\x7fELF", b"MZ", b"PK\x03\x04", b"%PDF-", b"\x1f\x8b")):
+                raise DocumentValidationError("Binary file is not text", code="INVALID_SIGNATURE")
+            decoder = codecs.getincrementaldecoder("utf-8")("strict")
+            try:
+                while data := source.read(UPLOAD_READ_BYTES):
+                    text = decoder.decode(data)
+                    if any((ord(char) < 32 and char not in "\t\r\n\f") or 127 <= ord(char) <= 159 for char in text):
+                        raise DocumentValidationError("Binary file is not text", code="INVALID_SIGNATURE")
+                decoder.decode(b"", final=True)
+            except UnicodeDecodeError as exc:
+                raise DocumentValidationError("Text documents must use UTF-8", code="INVALID_ENCODING") from exc
+
+
+class _BoundedTextParts(list):
+    """Stop accumulation of expanded PDF/DOCX/CSV text at a fixed ceiling."""
+
+    def __init__(self):
+        super().__init__()
+        self.characters = 0
+
+    def append(self, text):
+        self.characters += len(text) + 2
+        if self.characters > MAX_EXTRACTED_CHARACTERS:
+            raise DocumentValidationError("Extracted text exceeds limit", code="EXTRACTION_LIMIT")
+        super().append(text)
+
+
 def compute_checksum(file_path: Path) -> str:
     """Compute SHA256 checksum of file."""
     sha256 = hashlib.sha256()
@@ -237,7 +295,7 @@ def compute_checksum(file_path: Path) -> str:
 def extract_text_pdf(file_path: Path) -> tuple[str, DocumentMetadata]:
     """Extract text and metadata from PDF using pymupdf."""
     doc = pymupdf.open(str(file_path))
-    text_parts = []
+    text_parts = _BoundedTextParts()
     metadata = DocumentMetadata(format=DocumentFormat.pdf)
 
     # Extract document metadata
@@ -271,13 +329,16 @@ def extract_text_pdf(file_path: Path) -> tuple[str, DocumentMetadata]:
     metadata.page_count = doc.page_count
 
     # Extract text from each page
-    for page_num in range(doc.page_count):
-        page = doc[page_num]
-        text = page.get_text("text")
-        if text.strip():
-            text_parts.append(text)
-
-    doc.close()
+    try:
+        if doc.page_count > MAX_PDF_PAGES:
+            raise DocumentValidationError("PDF has too many pages", code="EXTRACTION_LIMIT")
+        for page_num in range(doc.page_count):
+            page = doc[page_num]
+            text = page.get_text("text")
+            if text.strip():
+                text_parts.append(text)
+    finally:
+        doc.close()
 
     full_text = "\n\n".join(text_parts)
     metadata.word_count = len(full_text.split())
@@ -289,7 +350,7 @@ def extract_text_pdf(file_path: Path) -> tuple[str, DocumentMetadata]:
 def extract_text_docx(file_path: Path) -> tuple[str, DocumentMetadata]:
     """Extract text and metadata from DOCX."""
     doc = DocxDocument(str(file_path))
-    text_parts = []
+    text_parts = _BoundedTextParts()
     metadata = DocumentMetadata(format=DocumentFormat.docx)
 
     # Extract core properties
@@ -355,7 +416,7 @@ def extract_text_csv(file_path: Path) -> tuple[str, DocumentMetadata]:
     import csv
 
     metadata = DocumentMetadata(format=DocumentFormat.csv)
-    text_parts = []
+    text_parts = _BoundedTextParts()
 
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         # Detect dialect
@@ -443,6 +504,8 @@ def chunk_text(
     with fallback to fixed-size chunking.
     """
     chunks = []
+    if len(text) > MAX_EXTRACTED_CHARACTERS:
+        raise DocumentValidationError("Extracted text exceeds limit", code="EXTRACTION_LIMIT")
 
     if config.strategy == "semantic":
         # Use unstructured's semantic chunking
@@ -456,6 +519,7 @@ def chunk_text(
         )
 
         for i, element in enumerate(chunked_elements):
+            _check_chunk_limit(i + 1)
             chunk_text = str(element)
             chunks.append(
                 DocumentChunk(
@@ -478,6 +542,7 @@ def chunk_text(
         )
 
         for i, element in enumerate(chunked_elements):
+            _check_chunk_limit(i + 1)
             chunk_text = str(element)
             chunks.append(
                 DocumentChunk(
@@ -495,6 +560,7 @@ def chunk_text(
         overlap_words = int(config.chunk_overlap * 0.75)
 
         for i in range(0, len(words), chunk_size_words - overlap_words):
+            _check_chunk_limit(len(chunks) + 1)
             chunk_words = words[i : i + chunk_size_words]
             chunk_text = " ".join(chunk_words)
             chunks.append(
@@ -509,6 +575,69 @@ def chunk_text(
     return chunks
 
 
+def _check_chunk_limit(count: int) -> None:
+    if count > MAX_DOCUMENT_CHUNKS:
+        raise DocumentValidationError(
+            f"Document exceeds the maximum of {MAX_DOCUMENT_CHUNKS} chunks",
+            code="TOO_MANY_CHUNKS",
+        )
+
+
+@asynccontextmanager
+async def _preserve_document_vectors(document: Document):
+    """Compensate vector writes if indexing or SQL commit fails.
+
+    Callers hold the document row lock until the SQL transaction completes.
+    SQL and Chroma cannot share a transaction; process crashes still require
+    reconciliation, but ordinary failures restore the prior vector snapshot.
+    """
+    document_id, user_id = str(document.id), str(document.user_id)
+
+    def snapshot():
+        retriever = RetrieverManager()
+        return retriever, retriever.get_document_vectors(document_id, user_id)
+
+    retriever, previous = await anyio.to_thread.run_sync(snapshot, limiter=INGEST_LIMITER)
+    try:
+        yield retriever
+    except BaseException:
+        def restore():
+            retriever.delete_document_vectors(document_id, user_id)
+            retriever.upsert_vectors(previous)
+
+        try:
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(restore, limiter=INGEST_LIMITER)
+        except Exception:
+            logger.exception("Document vector recovery failed for %s", document_id)
+        raise
+
+
+async def delete_stored_document(session: AsyncSession, document: Document) -> None:
+    """Remove vectors before committing SQL deletion; retain the file on failure."""
+    root = Path(get_settings().upload_dir)
+    resolve_storage_key(root, document.storage_key)
+    storage_key = document.storage_key
+    document_id, user_id = str(document.id), str(document.user_id)
+    try:
+        await session.delete(document)
+        await session.flush()
+        async with _preserve_document_vectors(document) as retriever:
+            await anyio.to_thread.run_sync(
+                retriever.delete_document_vectors, document_id, user_id, limiter=INGEST_LIMITER,
+            )
+            await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        raise DocumentProcessingError("Document deletion failed", code="DOCUMENT_DELETE_FAILED") from exc
+    # SQL deletion is durable before physical cleanup. A cleanup failure must not
+    # revive vectors or pretend that the committed SQL transaction rolled back.
+    try:
+        await anyio.to_thread.run_sync(lambda: resolve_storage_key(root, storage_key).unlink(missing_ok=True))
+    except OSError:
+        logger.exception("Deleted document file cleanup failed for %s", document_id)
+
+
 async def store_document(
     document: Document,
     chunks: list[DocumentChunk],
@@ -516,6 +645,7 @@ async def store_document(
     config: EmbeddingConfig,
 ) -> None:
     """Atomically replace a document's SQL chunks, serialized on its owner row."""
+    _check_chunk_limit(len(chunks))
     if len(chunks) != len(embeddings) or len({c.index for c in chunks}) != len(chunks):
         raise DocumentValidationError(
             "Chunks must have unique indices and one embedding each",
@@ -550,11 +680,11 @@ async def store_document(
         ])
         await session.flush()
         
-        def index_chunks() -> object:
-            retriever = RetrieverManager()
-            return retriever.add_documents(
-                documents=[chunk.content for chunk in chunks],
-                metadatas=[
+        def index_chunks(retriever) -> None:
+            retriever.delete_document_vectors(str(document.id), str(document.user_id))
+            retriever.add_document_chunks({
+                "documents": [chunk.content for chunk in chunks],
+                "metadatas": [
                     {
                         "source_id": str(document.id),
                         "source_type": "document",
@@ -565,19 +695,19 @@ async def store_document(
                     }
                     for chunk in chunks
                 ],
-                ids=[f"{document.id}_chunk_{chunk.index}" for chunk in chunks],
-            )
+                "ids": [f"{document.id}_chunk_{chunk.index}" for chunk in chunks],
+            })
 
         try:
-            await anyio.to_thread.run_sync(index_chunks, limiter=INGEST_LIMITER)
+            async with _preserve_document_vectors(db_document) as retriever:
+                await anyio.to_thread.run_sync(index_chunks, retriever, limiter=INGEST_LIMITER)
+                db_document.status = SourceStatus.ready
+                await session.commit()
         except Exception as exc:
             await session.rollback()
             raise DocumentProcessingError(
                 "Document vector indexing failed", code="RAG_INDEXING_FAILED"
             ) from exc
-
-        db_document.status = SourceStatus.ready
-        await session.commit()
 
 
 async def process_document(
@@ -609,10 +739,17 @@ async def process_document(
     try:
         # Always derive the input from the persisted key, never the caller's path.
         file_path = resolve_storage_key(Path(get_settings().upload_dir), document.storage_key)
+        # Reprocessing must enforce the same limits as new uploads.
+        format_ = await anyio.to_thread.run_sync(
+            validate_file, file_path, document.mime_type, document.size_bytes,
+            limiter=INGEST_LIMITER,
+        )
         # Step 1: Extract text and metadata
         text, metadata = await anyio.to_thread.run_sync(
             extract_text, file_path, format_, limiter=INGEST_LIMITER
         )
+        if len(text) > MAX_EXTRACTED_CHARACTERS:
+            raise DocumentValidationError("Extracted text exceeds limit", code="EXTRACTION_LIMIT")
 
         # Step 2: Clean text
         if config.clean_text:
@@ -626,6 +763,7 @@ async def process_document(
         )
 
         # Step 4: Generate embeddings
+        _check_chunk_limit(len(chunks))
         embeddings = await generate_embeddings(
             chunks, config.embedding.model_name, config.embedding.dimensions
         )
@@ -646,7 +784,7 @@ async def process_document(
             metadata=metadata.model_dump() if config.extract_metadata else {},
         )
 
-    except DocumentProcessingError:
+    except (DocumentProcessingError, DocumentValidationError):
         async with get_session_factory()() as session:
             failed_document = await session.get(Document, document_id)
             if failed_document:
@@ -680,6 +818,8 @@ async def upload_document(
     Returns the created Document entity.
     """
     settings = get_settings()
+    if len(file_content) > document_size_limit(getattr(settings, "max_file_size_mb", 15)):
+        raise DocumentValidationError("File exceeds maximum size", code="FILE_TOO_LARGE")
 
     # Generate unique storage key
     document_id = uuid.uuid4()
