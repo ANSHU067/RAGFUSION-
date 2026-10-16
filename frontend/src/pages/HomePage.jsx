@@ -5,6 +5,8 @@ import { Link } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { ComparisonStats, FeaturesAndBento, FinalCta, ProductPreview, TechCloud, UseCasesPricingFaq, WorkflowPipeline } from '@/components/common/LandingSections'
 import { PricingSection } from '@/components/landing/PricingSection'
+import { HeroErrorBoundary } from '@/components/common/HeroErrorBoundary'
+import { HeroFallback } from '@/components/common/HeroFallback'
 
 const HeroScene = lazy(() => import('../components/common/HeroScene'))
 
@@ -19,7 +21,7 @@ export default function HomePage() {
 
   useEffect(() => {
     const hero = heroRef.current
-    if (!hero) return
+    if (!hero || typeof IntersectionObserver !== 'function') return
 
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -93,9 +95,11 @@ export default function HomePage() {
               transition={{ delay: 0.15, duration: 0.7 }}
               className="relative h-[55vh] min-h-[400px] max-h-[600px] w-full"
             >
-              <Suspense fallback={<div className="h-full w-full" aria-label="Loading knowledge core" />}>
-                <HeroScene inView={inView} className="h-full w-full" />
-              </Suspense>
+              <HeroErrorBoundary>
+                <Suspense fallback={<HeroFallback />}>
+                  <HeroScene inView={inView} className="h-full w-full" />
+                </Suspense>
+              </HeroErrorBoundary>
             </motion.div>
           </div>
         </div>

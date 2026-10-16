@@ -16,14 +16,14 @@ export function CameraRig({
   const reducedMotion = useMemo(
     () =>
       typeof window !== 'undefined' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
     []
   )
 
   useFrame((state, delta) => {
     if (!enabled || reducedMotion) return
 
-    if (enableParallax) {
+    if (enableParallax && state.size.width > 0 && state.size.height > 0) {
       const x = (currentRef.current.x - state.size.width / 2) / (state.size.width / 2)
       const y = (currentRef.current.y - state.size.height / 2) / (state.size.height / 2)
 
@@ -70,7 +70,7 @@ export function ScrollCamera({
   const reducedMotion = useMemo(
     () =>
       typeof window !== 'undefined' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
     []
   )
 

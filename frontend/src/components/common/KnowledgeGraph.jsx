@@ -227,6 +227,7 @@ export function KnowledgeGraph({
   const [edgesData, setEdgesData] = useState([])
   
   const activeNodeRef = useRef(-1)
+  const activeNodeRemainingRef = useRef(0)
   const pathProgressRef = useRef(0)
   const activePathRef = useRef(-1)
 
@@ -265,10 +266,13 @@ export function KnowledgeGraph({
   }, [nodeCount])
 
   useFrame((state, delta) => {
+    // Keep expiration inside Fiber's lifecycle; no timer survives unmount.
+    activeNodeRemainingRef.current = Math.max(0, activeNodeRemainingRef.current - delta)
+    if (activeNodeRemainingRef.current === 0) activeNodeRef.current = -1
     // Randomly activate nodes
     if (Math.random() < 0.002) {
       activeNodeRef.current = Math.floor(Math.random() * nodeCount)
-      setTimeout(() => { activeNodeRef.current = -1 }, 2000)
+      activeNodeRemainingRef.current = 2
     }
 
     // Randomly activate retrieval paths

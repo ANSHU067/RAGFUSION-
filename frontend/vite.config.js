@@ -13,19 +13,7 @@ export default defineConfig({
       '@': srcDirectory,
     },
   },
-  build: {
-    rolldownOptions: {
-      output: {
-        codeSplitting: {
-          groups: [
-            {
-              name: 'three-renderer',
-              test: /node_modules[\\/](three|@react-three)[\\/]/,
-              maxSize: 400 * 1024,
-            },
-          ],
-        },
-      },
-    },
-  },
+  // Let the bundler preserve dependency initialization order. Forcing the
+  // renderer into size-limited chunks split React's CommonJS wrappers into
+  // a cycle that crashed the application before React could mount.
 })

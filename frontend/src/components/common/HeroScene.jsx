@@ -1,8 +1,7 @@
-import { Canvas } from '@react-three/fiber'
 import { Html } from '@react-three/drei'
-import { Suspense, useMemo, useEffect, useRef, useState, useCallback } from 'react'
+import { Suspense, useMemo, useEffect, useState, useCallback } from 'react'
 import { motion } from 'framer-motion'
-import * as THREE from 'three'
+import { HeroCanvas } from './HeroCanvas'
 
 import { Environment } from './Environment'
 import { Lights } from './Lights'
@@ -22,7 +21,6 @@ const HeroSceneContent = ({
   onQualityChange
 }) => {
   const intensity = inView ? 1 : 0.35
-  const [webglError, setWebglError] = useState(false)
 
   const retrievalNodes = useMemo(() => [
     [-4.5, 2, -1.5],
@@ -35,10 +33,6 @@ const HeroSceneContent = ({
     [5.5, -2.5, 2],
   ], [])
 
-  if (webglError) {
-    return <FallbackHero />
-  }
-
   const qualitySettings = {
     low: { antialias: false, pixelRatio: 1, orbitingDocs: 4, particles: 80, glassCards: 3, enablePostProcessing: false, enableGlow: false },
     medium: { antialias: true, pixelRatio: Math.min(window.devicePixelRatio, 1.5), orbitingDocs: 7, particles: 250, glassCards: 5, enablePostProcessing: true, enableGlow: true },
@@ -48,27 +42,14 @@ const HeroSceneContent = ({
   const settings = qualitySettings[quality] || qualitySettings.high
 
   return (
-    <Canvas
-      gl={{
-        preserveDrawingBuffer: true,
-        antialias: settings.antialias,
-        alpha: true,
-        logarithmicDepthBuffer: true,
-      }}
+    <HeroCanvas
+      antialias={settings.antialias}
+      pixelRatio={settings.pixelRatio}
       camera={{
         position: [0, 0, 6],
         fov: 45,
         near: 0.1,
         far: 100,
-      }}
-      onCreated={({ gl }) => {
-        gl.setPixelRatio(settings.pixelRatio)
-        gl.toneMapping = THREE.ACESFilmicToneMapping
-        gl.toneMappingExposure = 1.1
-        gl.domElement.addEventListener('webglcontextlost', (event) => {
-          event.preventDefault()
-          setWebglError(true)
-        })
       }}
     >
       <Suspense fallback={<LoadingFallback />}>
@@ -118,7 +99,7 @@ const HeroSceneContent = ({
       <Html fullscreen>
         <HeroOverlay inView={inView} quality={quality} onQualityChange={onQualityChange} />
       </Html>
-    </Canvas>
+    </HeroCanvas>
   )
 }
 
@@ -129,27 +110,6 @@ const LoadingFallback = () => (
       <p className="text-sm">Initializing knowledge core...</p>
     </div>
   </Html>
-)
-
-const FallbackHero = () => (
-  <motion.div
-    initial={{ opacity: 0, scale: 0.95 }}
-    animate={{ opacity: 1, scale: 1 }}
-    transition={{ duration: 0.6, delay: 0.2 }}
-    className="absolute inset-0 flex items-center justify-center bg-gradient-radial from-primary/10 via-transparent to-transparent"
-  >
-    <div className="text-center p-8">
-      <div className="w-48 h-48 mx-auto mb-8 rounded-full bg-linear-to-br from-primary/20 to-primary/5 border border-primary/20 flex items-center justify-center">
-        <svg className="w-24 h-24 text-primary/60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-        </svg>
-      </div>
-      <h3 className="text-xl font-semibold">RAGFUSION AI Knowledge Core</h3>
-      <p className="text-muted-foreground mt-2 max-w-sm mx-auto">
-        Advanced multi-agent retrieval with citations, knowledge graphs, and hybrid search.
-      </p>
-    </div>
-  </motion.div>
 )
 
 const HeroOverlay = ({ inView, quality, onQualityChange }) => {
@@ -208,31 +168,20 @@ const HeroOverlay = ({ inView, quality, onQualityChange }) => {
   )
 }
 
-const QualityToggle = ({ quality = 'high', onQualityChange }) => {
-  const selectRef = useRef(null)
-
-  // Re-attach event listener after quality change (Canvas remounts)
-  useEffect(() => {
-    const select = selectRef.current
-    if (select) {
-      select.value = quality
-    }
-  }, [quality])
-
-  return (
-    <select
-      ref={selectRef}
-      value={quality}
-      onChange={(e) => onQualityChange?.(e.target.value)}
-      className="bg-background/80 backdrop-blur-sm border border-border rounded-lg px-3 py-1.5 text-xs text-foreground"
-      aria-label="Graphics quality"
-    >
-      <option value="high">High Quality</option>
-      <option value="medium">Balanced</option>
-      <option value="low">Performance</option>
-    </select>
-  )
-}
+const QualityToggle = ({ quality = 'high', onQualityChange }) => (
+  <select
+    value={quality}
+    onChange={(event) => {
+      if (typeof onQualityChange === 'function') onQualityChange(event.target.value)
+    }}
+    className="bg-background/80 backdrop-blur-sm border border-border rounded-lg px-3 py-1.5 text-xs text-foreground"
+    aria-label="Graphics quality"
+  >
+    <option value="high">High Quality</option>
+    <option value="medium">Balanced</option>
+    <option value="low">Performance</option>
+  </select>
+)
 
 export function HeroScene({
   inView = false,
@@ -240,15 +189,22 @@ export function HeroScene({
   fallback = null
 }) {
   const [reducedMotion] = useState(() =>
-    typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
   )
-  const [quality, setQuality] = useState(() =>
-    typeof window !== 'undefined' ? localStorage.getItem('hero-quality') || 'high' : 'high'
-  )
+  const [quality, setQuality] = useState(() => {
+    try {
+      const saved = localStorage.getItem('hero-quality')
+      return ['low', 'medium', 'high'].includes(saved) ? saved : 'high'
+    } catch {
+      return 'high'
+    }
+  })
   // Persist quality setting to localStorage
   useEffect(() => {
-    if (typeof window !== 'undefined') {
+    try {
       localStorage.setItem('hero-quality', quality)
+    } catch {
+      // Storage may be disabled; quality still works for the current visit.
     }
   }, [quality])
 
