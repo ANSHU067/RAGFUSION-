@@ -9,28 +9,44 @@ from langchain_core.embeddings import Embeddings
 from app.config.settings import get_settings
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-MODEL_LIMITER = anyio.CapacityLimiter(2)
+MODEL_LIMITER = anyio.CapacityLimiter(1)
 _load_lock = RLock()
+_inference_lock = RLock()
 
 
-@lru_cache(maxsize=8)
-def _load_model(model_name: str, device: str):
-    from sentence_transformers import SentenceTransformer
+@lru_cache(maxsize=1)
+def _load_model(model_name: str):
+    from fastembed import TextEmbedding
 
     settings = get_settings()
-    return SentenceTransformer(
-        model_name,
-        device=device,
-        cache_folder=settings.embedding_cache_dir,
+    return TextEmbedding(
+        model_name=model_name,
+        cache_dir=settings.embedding_cache_dir,
         local_files_only=settings.embedding_local_files_only,
-        trust_remote_code=False,
+        threads=1,
+        providers=["CPUExecutionProvider"],
+        # Release activation buffers instead of retaining an arena at peak size.
+        enable_cpu_mem_arena=False,
     )
 
 
-def get_sentence_transformer(model_name: str = MODEL_NAME, device: str = "cpu"):
+def get_embedding_model(model_name: str = MODEL_NAME, device: str = "cpu"):
+    if device != "cpu":
+        raise ValueError("The lightweight embedding runtime requires device='cpu'")
     # lru_cache alone permits concurrent calls to initialize the same model.
     with _load_lock:
-        return _load_model(model_name, device)
+        return _load_model(model_name)
+
+
+def embed_texts(texts: list[str], model_name: str = MODEL_NAME) -> list[list[float]]:
+    """Consume the lazy generator in the worker, with bounded inference memory."""
+    if not texts:
+        return []
+    # A sync pipeline and an async ingestion request can run concurrently.
+    # Serialize both paths, and never enable FastEmbed multiprocessing.
+    with _inference_lock:
+        model = get_embedding_model(model_name)
+        return [vector.tolist() for vector in model.embed(texts, batch_size=4, parallel=None)]
 
 
 class SharedEmbeddings(Embeddings):
@@ -40,12 +56,7 @@ class SharedEmbeddings(Embeddings):
         self.model_name = model_name
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
-        return get_sentence_transformer(self.model_name).encode(
-            texts, batch_size=32, show_progress_bar=False,
-            convert_to_numpy=True, normalize_embeddings=False,
-        ).tolist()
+        return embed_texts(texts, self.model_name)
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]

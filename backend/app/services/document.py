@@ -13,11 +13,6 @@ from pathlib import Path
 
 import aiofiles
 import anyio
-import pymupdf
-from docx import Document as DocxDocument
-from pypdf import PdfReader
-from unstructured.cleaners.core import clean
-from unstructured.partition.text import partition_text
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -182,6 +177,9 @@ def _validate_format_specific(file_path: Path, format_: DocumentFormat) -> None:
     try:
         _validate_signature(file_path, format_)
         if format_ == DocumentFormat.pdf:
+            import pymupdf
+            from pypdf import PdfReader
+
             # Try to open with both pymupdf and pypdf
             with pymupdf.open(str(file_path)) as doc:
                 if doc.page_count == 0:
@@ -197,6 +195,8 @@ def _validate_format_specific(file_path: Path, format_: DocumentFormat) -> None:
                 )
 
         elif format_ == DocumentFormat.docx:
+            from docx import Document as DocxDocument
+
             doc = DocxDocument(str(file_path))
             # Check if document has any content
             has_content = any(p.text.strip() for p in doc.paragraphs)
@@ -294,6 +294,8 @@ def compute_checksum(file_path: Path) -> str:
 
 def extract_text_pdf(file_path: Path) -> tuple[str, DocumentMetadata]:
     """Extract text and metadata from PDF using pymupdf."""
+    import pymupdf
+
     doc = pymupdf.open(str(file_path))
     text_parts = _BoundedTextParts()
     metadata = DocumentMetadata(format=DocumentFormat.pdf)
@@ -349,6 +351,8 @@ def extract_text_pdf(file_path: Path) -> tuple[str, DocumentMetadata]:
 
 def extract_text_docx(file_path: Path) -> tuple[str, DocumentMetadata]:
     """Extract text and metadata from DOCX."""
+    from docx import Document as DocxDocument
+
     doc = DocxDocument(str(file_path))
     text_parts = _BoundedTextParts()
     metadata = DocumentMetadata(format=DocumentFormat.docx)
@@ -479,9 +483,17 @@ def extract_text(
     return extractor(file_path)
 
 
+def partition_text(**kwargs):
+    """Load the text parser only in the ingestion worker that needs it."""
+    from unstructured.partition.text import partition_text as partition
+
+    return partition(**kwargs)
+
+
 def clean_text(text: str) -> str:
     """Clean extracted text using unstructured cleaners."""
-    # Use unstructured's clean function
+    from unstructured.cleaners.core import clean
+
     cleaned = clean(
         text,
         bullets=True,

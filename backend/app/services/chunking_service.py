@@ -4,11 +4,6 @@ from __future__ import annotations
 
 import re
 
-from unstructured.chunking.basic import chunk_elements
-from unstructured.chunking.title import chunk_by_title
-from unstructured.partition.html import partition_html
-from unstructured.partition.text import partition_text
-
 from app.schemas.website import (
     WebsiteChunk,
     WebsiteChunkingConfig,
@@ -131,6 +126,9 @@ def chunk_text_recursive(
     Returns:
         List of WebsiteChunk objects
     """
+    from unstructured.chunking.basic import chunk_elements
+    from unstructured.partition.text import partition_text
+
     # Use unstructured's basic chunking
     elements = partition_text(text=text)
     chunked_elements = chunk_elements(
@@ -172,6 +170,9 @@ def chunk_text_semantic(
     Returns:
         List of WebsiteChunk objects
     """
+    from unstructured.chunking.title import chunk_by_title
+    from unstructured.partition.text import partition_text
+
     elements = partition_text(text=text)
     chunked_elements = chunk_by_title(
         elements,
@@ -212,6 +213,9 @@ def chunk_html_semantic(
     Returns:
         List of WebsiteChunk objects
     """
+    from unstructured.chunking.title import chunk_by_title
+    from unstructured.partition.html import partition_html
+
     elements = partition_html(text=html)
     chunked_elements = chunk_by_title(
         elements,

@@ -234,7 +234,7 @@ async def test_encoder_shared_by_concurrent_retrieval_and_ingestion(monkeypatch)
     from app.core import embedding_runtime as runtime
     from app.rag.embeddings.embedding_manager import EmbeddingManager
     from app.config.embedding_config import get_embedding_config
-    from app.services.embedding_service import SentenceTransformerProvider
+    from app.services.embedding_service import FastEmbedProvider
     from app.config.settings import get_settings
     calls = []
 
@@ -243,21 +243,21 @@ async def test_encoder_shared_by_concurrent_retrieval_and_ingestion(monkeypatch)
             time.sleep(0.01)
             calls.append(kwargs)
 
-        def encode(self, texts, **kwargs):
-            return np.ones((len(texts), 384))
+        def embed(self, texts, **kwargs):
+            yield from np.ones((len(texts), 384), dtype=np.float32)
 
-    monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=Encoder))
+    monkeypatch.setitem(sys.modules, "fastembed", SimpleNamespace(TextEmbedding=Encoder))
     monkeypatch.setattr(get_settings(), "embedding_local_files_only", True)
     runtime._load_model.cache_clear()
     try:
         with ThreadPoolExecutor(max_workers=6) as executor:
-            models = list(executor.map(lambda _: runtime.get_sentence_transformer(), range(12)))
+            models = list(executor.map(lambda _: runtime.get_embedding_model(), range(12)))
         assert all(model is models[0] for model in models)
         manager = EmbeddingManager()
         assert len(manager.embed_query("query")) == 384
-        provider = SentenceTransformerProvider(get_embedding_config("all-minilm-l6-v2"))
+        provider = FastEmbedProvider(get_embedding_config("all-minilm-l6-v2"))
         assert (await provider.embed_texts(["document"])).shape == (1, 384)
-        assert provider._model is models[0]
+        assert runtime.get_embedding_model() is models[0]
         assert len(calls) == 1
         assert calls[0]["local_files_only"] is True
     finally:

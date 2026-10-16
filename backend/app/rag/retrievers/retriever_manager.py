@@ -7,10 +7,6 @@ with ChromaDB.
 import logging
 from typing import Dict, List, Optional, Tuple
 
-import chromadb
-from chromadb.config import Settings
-from langchain_community.vectorstores import Chroma
-
 from app.core.rag_config import get_rag_config
 from app.rag.embeddings.embedding_manager import EmbeddingManager
 
@@ -35,6 +31,10 @@ class RetrieverManager:
             embedding_manager: EmbeddingManager instance
             top_k: Number of documents to retrieve
         """
+        import chromadb
+        from chromadb.config import Settings
+        from langchain_community.vectorstores import Chroma
+
         rag_config = get_rag_config()
 
         self.collection_name = collection_name

@@ -1,6 +1,3 @@
-# Embedding layer dependencies
-sentence-transformers>=3.0,<4.0
-FlagEmbedding>=1.2,<2.0
+# CPU ONNX inference only: no PyTorch/Transformers runtime.
+fastembed>=0.7.4,<0.8
 numpy>=1.26,<2.0
-# Keep the Transformers API compatible with the supported embedding providers.
-transformers>=4.41,<5.0

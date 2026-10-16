@@ -1,12 +1,12 @@
 """Embedding manager for document and query embeddings.
 
 This module handles document chunking and embedding generation using
-HuggingFace's embedding models.
+the shared FastEmbed ONNX runtime.
 """
 
 from typing import List, Optional
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app.core.embedding_runtime import SharedEmbeddings
 from app.core.rag_config import get_rag_config
 
@@ -35,7 +35,7 @@ class EmbeddingManager:
         self.chunk_size = chunk_size or rag_config.chunk_size
         self.chunk_overlap = chunk_overlap or rag_config.chunk_overlap
 
-        # Initialize embeddings using HuggingFace
+        # Initialize the shared CPU embedding adapter
         self.embeddings = SharedEmbeddings(self.model)
 
         # Initialize text splitter

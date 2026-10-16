@@ -42,7 +42,8 @@ class Settings(BaseSettings):
     chroma_telemetry: bool = Field(default=False, validation_alias="CHROMA_TELEMETRY")
     embedding_local_files_only: bool = True
     embedding_cache_dir: str | None = None
-    embedding_warmup: bool = True
+    # Low-memory hosts load the singleton on first use, in a bounded worker.
+    embedding_warmup: bool = False
 
     # Document ingestion
     upload_dir: str = Field(

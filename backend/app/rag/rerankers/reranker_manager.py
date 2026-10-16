@@ -7,7 +7,6 @@ and hybrid scoring approaches.
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from sentence_transformers import CrossEncoder
 
 from app.core.rag_config import get_rag_config
 
@@ -26,7 +25,16 @@ class RerankerManager:
 
         self.model_name = model_name or rag_config.rerank_model
         self.top_k = top_k or rag_config.top_k_rerank
-        self.model = CrossEncoder(self.model_name)
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+        from app.config.settings import get_settings
+
+        settings = get_settings()
+        self.model = TextCrossEncoder(
+            model_name=self.model_name,
+            cache_dir=settings.embedding_cache_dir,
+            threads=1,
+            local_files_only=settings.embedding_local_files_only,
+        )
 
     def rerank(
         self,
@@ -57,7 +65,7 @@ class RerankerManager:
         pairs = [[query, doc_text] for doc_text in doc_texts]
 
         # Get reranking scores
-        rerank_scores = self.model.predict(pairs)
+        rerank_scores = list(self.model.rerank_pairs(pairs, batch_size=4))
 
         # Combine with original data
         reranked_results = []
@@ -94,7 +102,7 @@ class RerankerManager:
         pairs = [[query, doc] for doc in documents]
 
         # Get reranking scores
-        scores = self.model.predict(pairs)
+        scores = np.asarray(list(self.model.rerank_pairs(pairs, batch_size=4)))
 
         # Combine and sort
         results = list(zip(documents, scores))
@@ -119,7 +127,7 @@ class RerankerManager:
         pairs = [[query, doc] for doc in documents]
 
         # Get reranking scores
-        scores = self.model.predict(pairs)
+        scores = np.asarray(list(self.model.rerank_pairs(pairs, batch_size=4)))
 
         return scores
 

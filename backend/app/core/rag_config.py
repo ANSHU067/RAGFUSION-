@@ -30,7 +30,7 @@ class RAGConfig(BaseSettings):
     )
 
     rerank_model: str = Field(
-        default="cross-encoder/ms-marco-MiniLM-L-2-v2",
+        default="Xenova/ms-marco-MiniLM-L-6-v2",
         description="Cross-encoder model for reranking",
     )
 

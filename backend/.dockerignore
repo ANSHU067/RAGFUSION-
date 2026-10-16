@@ -14,6 +14,10 @@ ragfusion_env
 **/.cache
 data/
 **/data/
+uploads/
+cache/
+chroma_db/
+vectorstore/
 *.db
 **/*.db
 **/*.sqlite*

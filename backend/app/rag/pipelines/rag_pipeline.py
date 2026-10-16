@@ -10,13 +10,9 @@ from typing import Any, Dict, List, NotRequired, Optional, Protocol, TypedDict, 
 
 from dotenv import load_dotenv
 
-from langchain_groq import ChatGroq
-from langgraph.graph import END, StateGraph
-
 from app.core.rag_config import get_rag_config
 from app.rag.embeddings.embedding_manager import EmbeddingManager
 from app.rag.prompts.prompt_builder import PromptBuilder
-from app.rag.rerankers.reranker_manager import RerankerManager
 from app.rag.retrievers.retriever_manager import RetrieverManager
 
 # Load backend/.env regardless of the directory from which Uvicorn is started
@@ -79,6 +75,8 @@ class RAGPipeline:
             )
             
         # Initialize LLM using ChatGroq
+        from langchain_groq import ChatGroq
+
         self.llm = ChatGroq(
             model=llm_model or "openai/gpt-oss-120b",
             api_key=api_key,
@@ -99,6 +97,8 @@ class RAGPipeline:
 
     def _build_graph(self) -> CompiledRAGGraph:
         """Build the LangGraph workflow."""
+        from langgraph.graph import END, StateGraph
+
         # Create workflow
         workflow = StateGraph(RAGState)
 

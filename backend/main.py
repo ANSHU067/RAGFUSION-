@@ -69,10 +69,10 @@ def create_app(*, rate_limiter: RateLimiter | None = None) -> FastAPI:
     @app.on_event("startup")
     async def warm_embedding_model() -> None:
         if settings.embedding_warmup:
-            from app.core.embedding_runtime import MODEL_LIMITER, get_sentence_transformer
+            from app.core.embedding_runtime import MODEL_LIMITER, get_embedding_model
 
             try:
-                await anyio.to_thread.run_sync(get_sentence_transformer, limiter=MODEL_LIMITER)
+                await anyio.to_thread.run_sync(get_embedding_model, limiter=MODEL_LIMITER)
             except Exception:
                 # Authentication and health remain usable when an operator has
                 # not provisioned the local model cache yet.

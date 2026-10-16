@@ -236,9 +236,9 @@ Tailwind CSS supplies consistent design primitives, Lucide provides icons, and R
 
 ### Local MiniLM over a cloud embedding API
 
-`sentence-transformers/all-MiniLM-L6-v2` produces 384-dimensional vectors and runs locally. This removes external per-token embedding fees and external embedding-request latency after provisioning. It also keeps source text local during embedding.
+`sentence-transformers/all-MiniLM-L6-v2` produces 384-dimensional vectors and runs locally through FastEmbed/ONNX Runtime, without PyTorch. The API shares one lazy CPU encoder and serializes inference in small batches. This removes external per-token embedding fees and external embedding-request latency after provisioning. It also keeps source text local during embedding.
 
-The runtime uses a lock-protected model cache keyed by model and device. Concurrent initialization cannot create duplicate copies for the same key. The shared adapter supports batched encoding, and CPU is the active default.
+The runtime uses a lock-protected model cache with one retained model. Concurrent initialization cannot create duplicate copies for the same key. The shared adapter runs CPU inference in batches of four without multiprocessing. The example environment disables startup warmup to keep idle API memory low; the first embedding request loads the model.
 
 The singleton is per process, not per deployment. More API workers can mean more model copies. Local embeddings still cost CPU, memory, and operational effort; they are not zero-latency computation. Selected context is later sent to Groq, so the complete RAG workflow is not offline.
 
@@ -628,7 +628,7 @@ values = {
         '["http://localhost:5173","http://127.0.0.1:5173"]',
     "RAGFUSION_JWT_SECRET_KEY": token_hex(32),
     "RAGFUSION_EMBEDDING_LOCAL_FILES_ONLY": "true",
-    "RAGFUSION_EMBEDDING_WARMUP": "true",
+    "RAGFUSION_EMBEDDING_WARMUP": "false",
     "GROQ_API_KEY": getpass("Groq API key: "),
 }
 for key, value in values.items():
@@ -668,7 +668,7 @@ From `backend/`, with the virtual environment active, download the embedding mod
 
 ```bash
 RAGFUSION_EMBEDDING_LOCAL_FILES_ONLY=false \
-python -c "from app.core.embedding_runtime import get_sentence_transformer; print(get_sentence_transformer().get_sentence_embedding_dimension())"
+python -c "from app.core.embedding_runtime import get_embedding_model; print(len(next(get_embedding_model().embed(['dimension check'], batch_size=1))))"
 ```
 
 The expected dimension is `384`. Subsequent starts can use the cached model with local-only loading enabled. A custom `RAGFUSION_EMBEDDING_CACHE_DIR` must be the same during provisioning and runtime.
@@ -743,7 +743,7 @@ docker compose run --rm api python -m alembic -c alembic.ini upgrade head
 
 docker compose run --rm \
   -e RAGFUSION_EMBEDDING_LOCAL_FILES_ONLY=false \
-  api python -c "from app.core.embedding_runtime import get_sentence_transformer; print(get_sentence_transformer().get_sentence_embedding_dimension())"
+  api python -c "from app.core.embedding_runtime import get_embedding_model; print(len(next(get_embedding_model().embed(['dimension check'], batch_size=1))))"
 
 docker compose up -d --build
 docker compose logs --tail=100 api

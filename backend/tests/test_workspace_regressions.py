@@ -191,8 +191,8 @@ def test_real_html_extraction_embeddings_and_chroma_round_trip(client, auth_head
     import chromadb
     from chromadb.config import Settings
     from app.services import crawler_service
-    from app.core.embedding_runtime import get_sentence_transformer
-    model = get_sentence_transformer()
+    from app.core.embedding_runtime import get_embedding_model
+    model = get_embedding_model()
     client_store = chromadb.PersistentClient(path=str(tmp_path / 'vectors'), settings=Settings(
         anonymized_telemetry=False,
         chroma_product_telemetry_impl='app.core.telemetry.DisabledProductTelemetry',
@@ -211,11 +211,11 @@ def test_real_html_extraction_embeddings_and_chroma_round_trip(client, auth_head
     assert len(stored['embeddings'][0]) == 384
     assert 'Coral' in stored['documents'][0]
     assert stored['metadatas'][0]['source_type'] == 'website'
-    query = model.encode(['What damages coral reefs?']).tolist()
+    query = [vector.tolist() for vector in model.embed(['What damages coral reefs?'], batch_size=1)]
     results = collection.query(query_embeddings=query, n_results=1, where={'website_id': source['id']})
     assert results['ids'][0][0] in stored['ids']
     # Another tenant's/source's filter cannot retrieve this content.
     assert collection.query(query_embeddings=query, n_results=1, where={'website_id': str(uuid4())})['ids'] == [[]]
-    assert get_sentence_transformer() is model
+    assert get_embedding_model() is model
     service.remove_vectors(UUID(source['id']), UUID(stored['metadatas'][0]['user_id']))
     assert collection.count() == 0

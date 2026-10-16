@@ -241,7 +241,7 @@ def test_docx_expansion_is_rejected_before_document_parser(tmp_path, monkeypatch
         archive.writestr("word/document.xml", "x" * 1000)
     monkeypatch.setattr(service, "MAX_DOCX_EXPANDED_BYTES", 100)
     parser = Mock(side_effect=AssertionError("Parser must not run"))
-    monkeypatch.setattr(service, "DocxDocument", parser)
+    monkeypatch.setattr("docx.Document", parser)
     with pytest.raises(service.DocumentValidationError) as failed:
         service.validate_file(path, None, path.stat().st_size)
     assert failed.value.code == "EXTRACTION_LIMIT"

@@ -13,7 +13,6 @@ langchain>=0.3,<1.0
 langchain-core>=0.3,<1.0
 langchain-text-splitters>=0.3,<1.0
 langchain-groq>=0.3,<0.4
-langchain-huggingface>=0.3,<0.4
 langchain-community>=0.3,<0.4
 langgraph>=0.2,<1.0
 python-jose[cryptography]>=3.3,<4.0
@@ -41,7 +40,7 @@ youtube-transcript-api>=1.0,<2.0
 requests>=2.32,<3.0
 overrides>=7.0,<8.0
 
-# Local embeddings and reranking are part of the active RAG import graph.
+# Lightweight ONNX embeddings; do not add integrations that pull in torch.
 -r embeddings.txt
 greenlet>=3.0.0
 pyarrow<17.0.0

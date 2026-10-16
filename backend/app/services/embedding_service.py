@@ -1,12 +1,11 @@
 """Embedding service with support for multiple providers and caching."""
 
-import asyncio
 import importlib.util
 import hashlib
 import logging
 from abc import ABC, abstractmethod
 from functools import lru_cache
-from typing import Dict, List, Optional, Protocol
+from typing import Dict, List, Optional
 
 import numpy as np
 from pydantic import BaseModel, Field
@@ -14,17 +13,11 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 
-class EmbeddingEncoder(Protocol):
-    """Minimal common contract for locally hosted embedding models."""
-
-    def encode(self, texts: list[str], **kwargs: object) -> object: ...
-
-
 class EmbeddingConfig(BaseModel):
     """Configuration for embedding models."""
 
     provider: str = Field(
-        ..., description="Embedding provider: baai, sentence-transformers, nvidia"
+        ..., description="Embedding provider: fastembed, nvidia (legacy local provider aliases accepted)"
     )
     model_name: str = Field(..., description="Model name/identifier")
     dimension: int = Field(..., description="Expected embedding dimension")
@@ -40,7 +33,7 @@ class EmbeddingConfig(BaseModel):
 class EmbeddingCache:
     """LRU cache for embeddings with hash-based lookup."""
 
-    def __init__(self, max_size: int = 10000):
+    def __init__(self, max_size: int = 256):
         self.max_size = max_size
         self._cache: Dict[str, np.ndarray] = {}
         self._access_order: List[str] = []
@@ -188,85 +181,22 @@ class BaseEmbeddingProvider(ABC):
         return np.vstack(all_embeddings)
 
 
-class BAAIEmbeddingProvider(BaseEmbeddingProvider):
-    """BAAI (FlagEmbedding) embedding provider."""
-
-    def __init__(self, config: EmbeddingConfig):
-        super().__init__(config)
-        self._model: EmbeddingEncoder | None = None
-        self._lock = asyncio.Lock()
-
-    async def _load_model(self):
-        """Load the BAAI model lazily."""
-        if self._model is None:
-            async with self._lock:
-                if self._model is None:
-                    try:
-                        from FlagEmbedding import FlagModel  # type: ignore[import-not-found]
-
-                        logger.info(f"Loading BAAI model: {self.config.model_name}")
-                        # Run in thread pool to avoid blocking
-                        loop = asyncio.get_event_loop()
-                        self._model = await loop.run_in_executor(
-                            None,
-                            lambda: FlagModel(
-                                self.config.model_name,
-                                use_fp16=(self.config.device != "cpu"),
-                                device=self.config.device,
-                            ),
-                        )
-                        logger.info("BAAI model loaded successfully")
-                    except ImportError:
-                        raise ImportError(
-                            "FlagEmbedding not installed. Install with: "
-                            "pip install FlagEmbedding"
-                        )
-
-    async def _generate_embeddings(self, texts: List[str]) -> np.ndarray:
-        """Generate embeddings using BAAI model."""
-        await self._load_model()
-        assert self._model is not None
-
-        # Run inference in thread pool
-        loop = asyncio.get_event_loop()
-        embeddings = await loop.run_in_executor(
-            None, lambda: self._model.encode(texts, batch_size=self.config.batch_size)
-        )
-
-        return np.array(embeddings)
-
-
-class SentenceTransformerProvider(BaseEmbeddingProvider):
-    """Sentence-Transformers embedding provider."""
-
-    def __init__(self, config: EmbeddingConfig):
-        super().__init__(config)
-        self._model: EmbeddingEncoder | None = None
-        self._lock = asyncio.Lock()
-
-    async def _load_model(self):
-        from app.core.embedding_runtime import MODEL_LIMITER, get_sentence_transformer
-        import anyio
-
-        if self._model is None:
-            self._model = await anyio.to_thread.run_sync(
-                get_sentence_transformer, self.config.model_name, self.config.device,
-                limiter=MODEL_LIMITER,
-            )
+class FastEmbedProvider(BaseEmbeddingProvider):
+    """ONNX embeddings using the same bounded singleton as query retrieval."""
 
     async def _generate_embeddings(self, texts: List[str]) -> np.ndarray:
         from functools import partial
-        import anyio
-        from app.core.embedding_runtime import MODEL_LIMITER
 
-        await self._load_model()
-        assert self._model is not None
+        import anyio
+        from app.core.embedding_runtime import MODEL_LIMITER, embed_texts
+
+        if self.config.device != "cpu":
+            raise ValueError("The lightweight embedding runtime requires device='cpu'")
         embeddings = await anyio.to_thread.run_sync(
-            partial(self._model.encode, texts, batch_size=self.config.batch_size,
-                    show_progress_bar=False, convert_to_numpy=True),
+            partial(embed_texts, texts, self.config.model_name),
             limiter=MODEL_LIMITER,
         )
-        return np.array(embeddings)
+        return np.asarray(embeddings, dtype=np.float32)
 
 
 class NVIDIAEmbeddingProvider(BaseEmbeddingProvider):
@@ -351,8 +281,9 @@ class EmbeddingService:
             api_key: API key (for NVIDIA provider)
         """
         provider_map = {
-            "baai": BAAIEmbeddingProvider,
-            "sentence-transformers": SentenceTransformerProvider,
+            "fastembed": FastEmbedProvider,
+            "baai": FastEmbedProvider,
+            "sentence-transformers": FastEmbedProvider,
             "nvidia": NVIDIAEmbeddingProvider,
         }
 

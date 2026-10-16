@@ -1,4 +1,160 @@
+---
+title: RAGFUSION API
+emoji: 📚
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+---
+
 # RAGFUSION Backend
+
+## Hugging Face Docker Space
+
+Publish the **contents of `backend/`** as the Space repository root, including
+this README, `Dockerfile`, `.dockerignore`, `entrypoint.sh`, `requirements/`,
+`alembic.ini`, `alembic/`, `app/`, and `main.py`. Do not publish `.env`, local
+uploads, database files, or credentials. This deploys the API; the React frontend
+is hosted separately. The Docker build context is `backend/`, not the monorepo
+root. The YAML above configures the Docker SDK and port 7860.
+
+In Space Settings, configure these **Secrets** before starting:
+
+- `RAGFUSION_DATABASE_URL`: the external PostgreSQL SQLAlchemy URL with the
+  `postgresql+asyncpg://` scheme, percent-encoded credentials, and provider-required
+  TLS settings. Do not use the local Compose host `postgres` or `localhost`.
+- `RAGFUSION_REDIS_URL`: the external Redis connection URL, using `rediss://` for
+  TLS. The existing limiter requires the Redis protocol and Lua scripting; an
+  HTTPS REST Redis URL is not interchangeable.
+- `RAGFUSION_JWT_SECRET_KEY`: a unique random secret. Generate it locally with
+  `openssl rand -hex 32` and paste it into Secrets. Production validation rejects
+  default secrets and values shorter than 32 characters.
+- `GROQ_API_KEY`: the Groq API credential.
+
+Set `RAGFUSION_CORS_ORIGINS` as a **Variable** containing a JSON array of the
+actual frontend HTTPS origins. Do not use a wildcard. Production mode is set in
+the image. Keep `RAGFUSION_TRUSTED_PROXIES` unset unless the proxy addresses are
+explicitly known; arbitrary forwarded client headers remain untrusted.
+
+**External service connectivity is required:** Spaces documents outbound ports
+80, 443, and 8080 only. PostgreSQL on 5432 and Redis on 6379 are therefore not
+usable directly. Provision provider-supported, reachable native-protocol
+endpoints on permitted ports (with TLS) or a supported secure gateway before
+deployment. Changing a URL's port alone does not create such an endpoint.
+See [Spaces networking](https://huggingface.co/docs/hub/spaces-overview#networking).
+Failed database migrations prevent startup; unreachable Redis keeps the existing
+fail-closed rate limiter returning 503.
+
+The image installs FastEmbed/ONNX Runtime (without PyTorch) and preloads
+`sentence-transformers/all-MiniLM-L6-v2` into `/app/cache/fastembed` at build
+time. The build verifies a local-only reload and 384 embedding dimensions.
+Runtime embedding loading uses that same cache with downloads disabled. The
+singleton loads on first use by default (`RAGFUSION_EMBEDDING_WARMUP=false`),
+with one inference thread, batches of four, and serialized worker execution. Do not
+mount an empty volume over `/app/cache`, which would hide the baked model.
+The process runs as UID/GID 1000 and owns `/app/data`, `/app/uploads`, and
+`/app/cache`. The entrypoint runs `python -m alembic upgrade head`, then replaces
+itself with one Uvicorn worker on `${PORT:-7860}` (7860 on Spaces; Render supplies
+`PORT`). Migrations use the same database URL
+as the API; take a database backup before deploying schema changes.
+
+Chroma lives at `/app/data/vectorstore`; uploaded files live at `/app/uploads`.
+These runtime files are **ephemeral** on this deployment. PostgreSQL source
+records can outlive the files/vectors, so after disk loss they may still appear
+ready even though retrieval is empty. Re-upload documents and re-ingest URL
+sources after such a reset. The baked embedding cache returns with the image.
+See [Docker Spaces storage](https://huggingface.co/docs/hub/spaces-sdks-docker#data-persistence).
+
+Build from the RAGFUSION repository root:
+
+```bash
+docker build -t ragfusion-hf -f backend/Dockerfile backend
+docker run --rm -p 7860:7860 --env-file backend/.env ragfusion-hf
+curl --fail-with-body http://localhost:7860/api/v1/health
+```
+
+The local `.env` must contain the deployment secrets and origins described above;
+host `localhost` inside a container refers to that container. Once deployed,
+open `/docs` on the Space's direct application URL to inspect the API. Check the
+health response body as well as its HTTP status: dependency outages report a
+degraded state. No Docker image build or deployment is implied by these commands.
+
+The local Compose file maps host port 8000 to container port 7860. If reusing
+volumes created by the earlier UID 10001 image, stop the API and update ownership
+once before starting the new image:
+
+```bash
+cd backend
+docker compose stop api
+docker compose build api
+docker compose run --rm --no-deps --user 0 --entrypoint sh api -c \
+  'chown -R 1000:1000 /app/uploads /app/data/vectorstore'
+docker compose up -d
+```
+
+## Low-memory Render deployment and verification
+
+Use the Docker runtime with `backend/` as the build context. The same image
+supports Render's `PORT` environment variable. Keep one Uvicorn worker: extra
+workers duplicate model and application memory. Keep embedding warmup disabled
+for small hosts. The image downloads the ONNX model during build, not boot.
+`RAGFUSION_EMBEDDING_CACHE_DIR` must point at the FastEmbed cache, not an old
+SentenceTransformer cache. No `torch`, `torchvision`, `sentence-transformers`,
+`transformers`, `FlagEmbedding`, or `langchain-huggingface` package is required.
+
+For an existing native Python service, rebuild in a clean environment using
+`requirements/base.txt`; installing updated requirements into an old environment
+does not uninstall PyTorch. Set Python 3.11 and a writable
+`RAGFUSION_EMBEDDING_CACHE_DIR` that is retained from build to runtime. In the
+backend build command, after installing requirements, prefetch with:
+
+```bash
+python -c 'import os; from fastembed import TextEmbedding; TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2", cache_dir=os.environ["RAGFUSION_EMBEDDING_CACHE_DIR"], threads=1, lazy_load=True)'
+```
+
+The Docker entrypoint uses `/app`; native services should instead run from the
+backend directory with their existing environment configuration:
+
+```bash
+python -m alembic upgrade head && python -m uvicorn main:app --host 0.0.0.0 --port "${PORT:-7860}" --workers 1 --no-proxy-headers
+```
+
+Measure the actual target environment from `backend/` (these commands start a
+short-lived server on an ephemeral loopback port, then shut it down):
+
+```bash
+python scripts/check_memory.py --max-mib 300
+python scripts/check_memory.py --embed --max-mib 512
+python -m pytest tests/ -q
+python -m pip check
+```
+
+The existing semantic/recursive document-parser tests also need their language
+resources. For the resolved Unstructured 0.27.x dependency, provision the small
+English parser model once with `python -m spacy download en_core_web_sm` before
+running offline tests. The Docker image includes that parser model with a
+SHA-256-verified download. This resource is separate from the MiniLM ONNX cache
+and is not loaded during API boot.
+
+A clean Python 3.11/macOS ARM64 validation on 17 October 2026 measured **157.7 MiB
+peak at API startup** and **316.34 MiB including the first real MiniLM inference**
+(FastEmbed 0.7.4, ONNX Runtime 1.31.0, NumPy 1.26.4). Neither measurement imported
+PyTorch or Transformers. These figures describe the local process, not a Render
+container; use the commands above to enforce the budget in the target runtime.
+
+The memory check reports process peak RSS and fails above the requested budget
+or if a forbidden heavy embedding runtime is imported. Startup and first
+embedding measurements are separate: Chroma, parsers, ingestion buffers, and
+concurrent traffic consume additional memory. Passing a startup check does not
+guarantee every workload fits 512 MiB. Run the same check on Render/Linux before
+asserting the deployment's memory budget; macOS results are not Linux measurements.
+
+The adapter retains MiniLM's 384-dimensional space and uses FastEmbed's
+normalized vectors consistently for queries and ingestion. Re-ingest existing
+sources when switching encoders to avoid mixed numerical implementations and
+normalization in the same index. The optional cross-encoder reranker is ONNX
+based and remains disabled in the standard chat pipeline; it would need a
+separately cached model and more memory if explicitly enabled.
 
 ## Local development
 
