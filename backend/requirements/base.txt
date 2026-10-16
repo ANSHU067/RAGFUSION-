@@ -43,3 +43,4 @@ overrides>=7.0,<8.0
 
 # Local embeddings and reranking are part of the active RAG import graph.
 -r embeddings.txt
+greenlet>=3.0.0
