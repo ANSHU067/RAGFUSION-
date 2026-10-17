@@ -1,6 +1,7 @@
 """Typed configuration loaded from the environment."""
 
 from functools import lru_cache
+import os
 from pathlib import Path
 
 from pydantic import AliasChoices, Field, field_validator
@@ -40,8 +41,16 @@ class Settings(BaseSettings):
     rate_limit_redis_timeout_seconds: float = Field(default=1.0, gt=0, le=5)
     anonymize_telemetry: bool = Field(default=False, validation_alias="ANONYMIZE_TELEMETRY")
     chroma_telemetry: bool = Field(default=False, validation_alias="CHROMA_TELEMETRY")
-    embedding_local_files_only: bool = True
-    embedding_cache_dir: str | None = None
+    # Reuse cached ONNX files, downloading them on first use when absent.
+    # Offline-only mode is opt-in for deployments with a provisioned cache.
+    embedding_local_files_only: bool = False
+    embedding_cache_dir: str = Field(
+        default_factory=lambda: str(
+            Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+            / "ragfusion" / "fastembed"
+        ),
+        min_length=1,
+    )
     # Low-memory hosts load the singleton on first use, in a bounded worker.
     embedding_warmup: bool = False
 

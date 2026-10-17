@@ -230,7 +230,7 @@ def test_transcript_socket_deadlines_and_disabled_transcripts_do_not_retry(monke
 
 
 @pytest.mark.asyncio
-async def test_encoder_shared_by_concurrent_retrieval_and_ingestion(monkeypatch):
+async def test_encoder_shared_by_concurrent_retrieval_and_ingestion(monkeypatch, tmp_path):
     from app.core import embedding_runtime as runtime
     from app.rag.embeddings.embedding_manager import EmbeddingManager
     from app.config.embedding_config import get_embedding_config
@@ -248,6 +248,7 @@ async def test_encoder_shared_by_concurrent_retrieval_and_ingestion(monkeypatch)
 
     monkeypatch.setitem(sys.modules, "fastembed", SimpleNamespace(TextEmbedding=Encoder))
     monkeypatch.setattr(get_settings(), "embedding_local_files_only", True)
+    monkeypatch.setattr(get_settings(), "embedding_cache_dir", str(tmp_path / "models"))
     runtime._load_model.cache_clear()
     try:
         with ThreadPoolExecutor(max_workers=6) as executor:

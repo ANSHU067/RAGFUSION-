@@ -627,7 +627,7 @@ values = {
     "RAGFUSION_CORS_ORIGINS":
         '["http://localhost:5173","http://127.0.0.1:5173"]',
     "RAGFUSION_JWT_SECRET_KEY": token_hex(32),
-    "RAGFUSION_EMBEDDING_LOCAL_FILES_ONLY": "true",
+    "RAGFUSION_EMBEDDING_LOCAL_FILES_ONLY": "false",
     "RAGFUSION_EMBEDDING_WARMUP": "false",
     "GROQ_API_KEY": getpass("Groq API key: "),
 }
@@ -671,7 +671,7 @@ RAGFUSION_EMBEDDING_LOCAL_FILES_ONLY=false \
 python -c "from app.core.embedding_runtime import get_embedding_model; print(len(next(get_embedding_model().embed(['dimension check'], batch_size=1))))"
 ```
 
-The expected dimension is `384`. Subsequent starts can use the cached model with local-only loading enabled. A custom `RAGFUSION_EMBEDDING_CACHE_DIR` must be the same during provisioning and runtime.
+The expected dimension is `384`. Runtime loading reuses cached files and downloads missing files by default. The default cache is `$XDG_CACHE_HOME/ragfusion/fastembed`, or `~/.cache/ragfusion/fastembed` when XDG_CACHE_HOME is unset. A custom `RAGFUSION_EMBEDDING_CACHE_DIR` must be the same during provisioning and runtime. Enable local-only loading only when the complete FastEmbed cache is guaranteed to be available.
 
 ```bash
 python -m alembic -c alembic.ini heads

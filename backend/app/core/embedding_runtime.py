@@ -1,6 +1,7 @@
 """Process-wide local embedding models shared by ingestion and retrieval."""
 
 from functools import lru_cache, partial
+from pathlib import Path
 from threading import RLock
 
 import anyio
@@ -19,9 +20,12 @@ def _load_model(model_name: str):
     from fastembed import TextEmbedding
 
     settings = get_settings()
+    cache_dir = Path(settings.embedding_cache_dir).expanduser().resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
     return TextEmbedding(
         model_name=model_name,
-        cache_dir=settings.embedding_cache_dir,
+        cache_dir=str(cache_dir),
+        # False by default: a missing cache must trigger a model download.
         local_files_only=settings.embedding_local_files_only,
         threads=1,
         providers=["CPUExecutionProvider"],

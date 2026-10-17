@@ -97,9 +97,19 @@ docker compose up -d
 Use the Docker runtime with `backend/` as the build context. The same image
 supports Render's `PORT` environment variable. Keep one Uvicorn worker: extra
 workers duplicate model and application memory. Keep embedding warmup disabled
-for small hosts. The image downloads the ONNX model during build, not boot.
+for small hosts. The image pre-downloads the ONNX model during build. Runtime
+loading reuses that cache and can download missing model files on first use.
 `RAGFUSION_EMBEDDING_CACHE_DIR` must point at the FastEmbed cache, not an old
-SentenceTransformer cache. No `torch`, `torchvision`, `sentence-transformers`,
+SentenceTransformer cache. Set `RAGFUSION_EMBEDDING_LOCAL_FILES_ONLY=false` in
+Render's environment, removing any old `true` override. Native Python services
+default to `$XDG_CACHE_HOME/ragfusion/fastembed` or
+`~/.cache/ragfusion/fastembed`; Docker defaults to `/app/cache/fastembed`. For a
+Render persistent disk mounted at `/var/data`, set
+`RAGFUSION_EMBEDDING_CACHE_DIR=/var/data/fastembed`. Without a persistent disk,
+the cache can disappear on redeploy and the first embedding request will
+download the model again. Downloading requires outbound network access; failures
+still propagate to ingestion instead of reporting a falsely ready document.
+No `torch`, `torchvision`, `sentence-transformers`,
 `transformers`, `FlagEmbedding`, or `langchain-huggingface` package is required.
 
 For an existing native Python service, rebuild in a clean environment using

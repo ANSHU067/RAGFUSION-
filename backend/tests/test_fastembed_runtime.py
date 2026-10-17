@@ -3,6 +3,7 @@
 import asyncio
 import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,11 +11,12 @@ import pytest
 
 from app.core import embedding_runtime as runtime
 from app.config.embedding_config import get_embedding_config
+from app.config.settings import Settings
 from app.services.embedding_service import FastEmbedProvider
 
 
 @pytest.fixture
-def encoder(monkeypatch):
+def encoder(monkeypatch, tmp_path):
     calls = []
 
     class Encoder:
@@ -30,6 +32,9 @@ def encoder(monkeypatch):
                 yield vector
 
     monkeypatch.setitem(sys.modules, "fastembed", SimpleNamespace(TextEmbedding=Encoder))
+    monkeypatch.setattr(runtime, "get_settings", lambda: SimpleNamespace(
+        embedding_cache_dir=str(tmp_path / "models"), embedding_local_files_only=False,
+    ))
     runtime._load_model.cache_clear()
     yield calls
     runtime._load_model.cache_clear()
@@ -72,6 +77,43 @@ def test_gpu_request_is_rejected_without_loading(encoder):
     with pytest.raises(ValueError, match="requires device='cpu'"):
         runtime.get_embedding_model(device="cuda")
     assert encoder == []
+
+
+def test_default_settings_allow_downloads_to_standard_cache(monkeypatch, tmp_path):
+    from app.config.branding_compat import LEGACY_ENV_PREFIX
+
+    for prefix in ("RAGFUSION_", LEGACY_ENV_PREFIX):
+        monkeypatch.delenv(prefix + "EMBEDDING_LOCAL_FILES_ONLY", raising=False)
+        monkeypatch.delenv(prefix + "EMBEDDING_CACHE_DIR", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    settings = Settings(_env_file=None)
+    assert settings.embedding_local_files_only is False
+    assert Path(settings.embedding_cache_dir) == tmp_path / "ragfusion" / "fastembed"
+
+
+def test_missing_cache_allows_download_and_reuses_singleton(monkeypatch, tmp_path):
+    cache = tmp_path / "missing" / "fastembed"
+    loads = []
+
+    class DownloadingEncoder:
+        def __init__(self, **kwargs):
+            loads.append(kwargs)
+            assert Path(kwargs["cache_dir"]).is_dir()
+            if kwargs["local_files_only"]:
+                raise ValueError("Could not load model from any source")
+
+    monkeypatch.setitem(sys.modules, "fastembed", SimpleNamespace(TextEmbedding=DownloadingEncoder))
+    monkeypatch.setattr(runtime, "get_settings", lambda: SimpleNamespace(
+        embedding_cache_dir=str(cache), embedding_local_files_only=False,
+    ))
+    runtime._load_model.cache_clear()
+    try:
+        model = runtime.get_embedding_model()
+        assert runtime.get_embedding_model() is model
+        assert len(loads) == 1
+        assert loads[0]["cache_dir"] == str(cache)
+    finally:
+        runtime._load_model.cache_clear()
 
 
 @pytest.mark.asyncio
