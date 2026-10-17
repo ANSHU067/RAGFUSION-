@@ -13,6 +13,11 @@ export default defineConfig({
       '@': srcDirectory,
     },
   },
+  // HeroScene is one lazy-loaded renderer bundle. Keep it intact so React
+  // Three Fiber's CommonJS initialization order cannot be split into a cycle.
+  build: {
+    chunkSizeWarningLimit: 1200,
+  },
   // Let the bundler preserve dependency initialization order. Forcing the
   // renderer into size-limited chunks split React's CommonJS wrappers into
   // a cycle that crashed the application before React could mount.

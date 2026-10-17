@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import * as THREE from 'three'
 
 export function Environment({ children }) {
@@ -50,9 +50,19 @@ export function Environment({ children }) {
     
     const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat)
     tex.mapping = THREE.EquirectangularReflectionMapping
+    // This is CPU-generated RGBA data, rather than an HTML image. Explicitly
+    // disable browser upload transforms so WebGL never applies image-only
+    // flags to a data texture.
+    tex.flipY = false
+    tex.premultiplyAlpha = false
+    // The texture has no mip chain and is immutable after construction. This
+    // prevents Three from trying to allocate additional storage on updates.
+    tex.generateMipmaps = false
     tex.needsUpdate = true
     return tex
   }, [])
+
+  useEffect(() => () => texture.dispose(), [texture])
 
   return (
     <>
