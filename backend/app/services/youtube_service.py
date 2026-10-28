@@ -28,7 +28,7 @@ from app.models.entities import Embedding, SourceStatus, YouTubeSource
 from app.rag.retrievers.retriever_manager import RetrieverManager
 from app.services.embedding_helper import generate_embeddings
 
-INGEST_LIMITER = anyio.CapacityLimiter(2)
+from app.core.worker_limits import INGEST_LIMITER, VECTOR_LIMITER
 
 
 class YouTubeIngestionError(Exception):
@@ -123,7 +123,7 @@ async def ensure_youtube_sources_in_retriever(
                 source.video_id,
                 source.url,
                 chunks,
-                limiter=INGEST_LIMITER,
+                limiter=VECTOR_LIMITER,
             )
         except Exception as exc:
             raise YouTubeIngestionError(
@@ -494,7 +494,7 @@ async def ingest_youtube(
                 video_id,
                 url,
                 chunk_objects,
-                limiter=INGEST_LIMITER,
+                limiter=VECTOR_LIMITER,
             )
         except Exception as exc:
             raise YouTubeIngestionError(

@@ -16,6 +16,7 @@ from app.rag.retrievers.retriever_manager import RetrieverManager
 from app.schemas.document import ChunkingConfig
 from app.services.crawler_service import crawl_single_page
 from app.services.document import INGEST_LIMITER, chunk_text
+from app.core.worker_limits import VECTOR_LIMITER
 from app.services.embedding_helper import generate_embeddings
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ async def process_website(db: AsyncSession, source_id: UUID, owner_id: UUID) -> 
             title = (page.metadata.title if page.metadata else None) or source.url
             await anyio.to_thread.run_sync(
                 store_vectors, source.id, owner_id, source.url, title[:512], chunks, vectors,
-                limiter=INGEST_LIMITER,
+                limiter=VECTOR_LIMITER,
             )
             await db.execute(delete(Embedding).where(Embedding.website_id == source.id))
             db.add_all([Embedding(

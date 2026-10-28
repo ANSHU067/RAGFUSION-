@@ -13,7 +13,7 @@ from app.db.session import get_db_session
 from app.models.entities import SourceStatus, Website
 from app.schemas.website import WebsiteResponse, WebsiteListResponse, WebsiteSubmission
 from app.services.crawler_service import CrawlerValidationError, validate_url
-from app.services.document import INGEST_LIMITER
+from app.core.worker_limits import VECTOR_LIMITER
 from app.services.website_service import process_website, remove_vectors
 
 router = APIRouter(prefix="/website", tags=["website"])
@@ -84,7 +84,7 @@ async def remove(source_id: UUID, user=Depends(get_current_user_id), db: AsyncSe
     if source.status == SourceStatus.processing:
         raise AppException("Wait for website processing to finish", status_code=409)
     try:
-        await anyio.to_thread.run_sync(remove_vectors, source.id, user.id, limiter=INGEST_LIMITER)
+        await anyio.to_thread.run_sync(remove_vectors, source.id, user.id, limiter=VECTOR_LIMITER)
     except Exception as exc:
         raise AppException("Website deletion failed", status_code=502) from exc
     await db.delete(source)

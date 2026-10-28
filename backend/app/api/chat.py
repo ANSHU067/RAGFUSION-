@@ -2,6 +2,8 @@
 
 import logging
 import asyncio
+import time
+import anyio
 from typing import Annotated
 from uuid import UUID
 
@@ -27,6 +29,7 @@ from app.schemas.chat import (
 from app.services.chat_service import ChatService
 from app.services.memory_service import MemoryService
 from app.core.exceptions import AppException, NotFoundError
+from app.core.worker_limits import VECTOR_LIMITER
 from app.repositories.settings_repository import SettingsRepository
 from app.rag.pipelines.rag_pipeline import RAGPipeline
 from app.models.entities import Document, Website, YouTubeSource, Embedding, SourceStatus
@@ -67,13 +70,17 @@ async def get_chat_service(
         async with request.app.state.rag_pipeline_lock:
             pipeline = request.app.state.rag_pipeline
             pipeline_error = getattr(request.app.state, "rag_pipeline_error", None)
-            if pipeline is None and pipeline_error is None:
+            retry_after = getattr(request.app.state, "rag_pipeline_retry_after", 0)
+            if pipeline is None and (pipeline_error is None or time.monotonic() >= retry_after):
                 try:
-                    pipeline = await asyncio.to_thread(RAGPipeline)
+                    pipeline = await anyio.to_thread.run_sync(RAGPipeline, limiter=VECTOR_LIMITER)
                     request.app.state.rag_pipeline = pipeline
+                    request.app.state.rag_pipeline_error = None
+                    pipeline_error = None
                 except Exception as exc:
                     logger.error("RAG pipeline initialization failed", exc_info=True)
                     request.app.state.rag_pipeline_error = exc
+                    request.app.state.rag_pipeline_retry_after = time.monotonic() + 5
                     pipeline_error = exc
     return ChatService(
         db=db,

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import anyio
 from typing import Any
+from app.core.worker_limits import EMBEDDING_RESULT_LIMITER
 from app.config.embedding_config import get_embedding_config
 from app.services.embedding_service import get_embedding_service
 
@@ -36,7 +38,7 @@ async def generate_embeddings(
     Args:
         chunks: List of chunk objects (DocumentChunk, WebsiteChunk, etc.)
         model_name: Embedding model name
-        dimensions: Embedding dimensions (default: 1536)
+        dimensions: Embedding dimensions (MiniLM: 384)
 
     Returns:
         List of embedding vectors as lists of floats
@@ -82,7 +84,9 @@ async def generate_embeddings(
         embeddings_array = await service.embed_texts(texts, provider_name=provider_name)
 
         # Convert numpy array to list of lists
-        embeddings = embeddings_array.tolist()
+        embeddings = await anyio.to_thread.run_sync(
+            embeddings_array.tolist, limiter=EMBEDDING_RESULT_LIMITER
+        )
 
         logger.info(f"Successfully generated {len(embeddings)} embeddings, dimension={len(embeddings[0]) if embeddings else 0}")
 

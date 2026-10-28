@@ -17,6 +17,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import get_settings
+from app.core.worker_limits import INGEST_LIMITER, VECTOR_LIMITER
 from app.core.ingestion_limits import (
     MAX_DOCUMENT_BYTES, MAX_DOCUMENT_CHUNKS, MAX_EXTRACTED_CHARACTERS,
     MAX_DOCX_EXPANDED_BYTES, MAX_DOCX_ENTRIES, MAX_PDF_PAGES,
@@ -56,7 +57,6 @@ EXTENSION_TO_FORMAT = {
 }
 
 MAX_FILE_SIZE = MAX_DOCUMENT_BYTES
-INGEST_LIMITER = anyio.CapacityLimiter(2)
 logger = logging.getLogger(__name__)
 
 
@@ -609,7 +609,7 @@ async def _preserve_document_vectors(document: Document):
         retriever = RetrieverManager()
         return retriever, retriever.get_document_vectors(document_id, user_id)
 
-    retriever, previous = await anyio.to_thread.run_sync(snapshot, limiter=INGEST_LIMITER)
+    retriever, previous = await anyio.to_thread.run_sync(snapshot, limiter=VECTOR_LIMITER)
     try:
         yield retriever
     except BaseException:
@@ -619,7 +619,7 @@ async def _preserve_document_vectors(document: Document):
 
         try:
             with anyio.CancelScope(shield=True):
-                await anyio.to_thread.run_sync(restore, limiter=INGEST_LIMITER)
+                await anyio.to_thread.run_sync(restore, limiter=VECTOR_LIMITER)
         except Exception:
             logger.exception("Document vector recovery failed for %s", document_id)
         raise
@@ -636,7 +636,7 @@ async def delete_stored_document(session: AsyncSession, document: Document) -> N
         await session.flush()
         async with _preserve_document_vectors(document) as retriever:
             await anyio.to_thread.run_sync(
-                retriever.delete_document_vectors, document_id, user_id, limiter=INGEST_LIMITER,
+                retriever.delete_document_vectors, document_id, user_id, limiter=VECTOR_LIMITER,
             )
             await session.commit()
     except Exception as exc:
@@ -696,6 +696,7 @@ async def store_document(
             retriever.delete_document_vectors(str(document.id), str(document.user_id))
             retriever.add_document_chunks({
                 "documents": [chunk.content for chunk in chunks],
+                "embeddings": embeddings,
                 "metadatas": [
                     {
                         "source_id": str(document.id),
@@ -712,7 +713,7 @@ async def store_document(
 
         try:
             async with _preserve_document_vectors(db_document) as retriever:
-                await anyio.to_thread.run_sync(index_chunks, retriever, limiter=INGEST_LIMITER)
+                await anyio.to_thread.run_sync(index_chunks, retriever, limiter=VECTOR_LIMITER)
                 db_document.status = SourceStatus.ready
                 await session.commit()
         except Exception as exc:

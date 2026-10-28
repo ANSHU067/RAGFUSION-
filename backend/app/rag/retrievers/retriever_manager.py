@@ -6,7 +6,9 @@ with ChromaDB.
 
 import logging
 from typing import Dict, List, Optional, Tuple
+from pathlib import Path
 
+from app.core.chroma_runtime import get_chroma_client
 from app.core.rag_config import get_rag_config
 from app.rag.embeddings.embedding_manager import EmbeddingManager
 
@@ -31,27 +33,19 @@ class RetrieverManager:
             embedding_manager: EmbeddingManager instance
             top_k: Number of documents to retrieve
         """
-        import chromadb
-        from chromadb.config import Settings
-        from langchain_community.vectorstores import Chroma
+        from langchain_chroma import Chroma
 
         rag_config = get_rag_config()
 
         self.collection_name = collection_name
-        self.persist_directory = str(persist_directory or rag_config.vector_store_path)
+        self.persist_directory = str(Path(persist_directory or rag_config.vector_store_path).expanduser().resolve())
         self.top_k = top_k or rag_config.top_k_retrieval
 
         # Initialize embedding manager
         self.embedding_manager = embedding_manager or EmbeddingManager()
 
         # Initialize ChromaDB client
-        self.client = chromadb.PersistentClient(
-            path=self.persist_directory, settings=Settings(
-                anonymized_telemetry=False,
-                chroma_product_telemetry_impl="app.core.telemetry.DisabledProductTelemetry",
-                chroma_telemetry_impl="app.core.telemetry.DisabledProductTelemetry",
-            )
-        )
+        self.client = get_chroma_client(self.persist_directory)
 
         # Initialize vector store
         self.vectorstore = Chroma(
@@ -188,6 +182,9 @@ class RetrieverManager:
 
     def add_document_chunks(self, records: Dict) -> None:
         """Index already bounded chunks with the existing Chroma encoder."""
+        if records.get("embeddings") is not None:
+            self.upsert_vectors(records)
+            return
         for start in range(0, len(records["ids"]), 100):
             self.vectorstore.add_texts(
                 texts=records["documents"][start:start + 100],

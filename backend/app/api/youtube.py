@@ -26,8 +26,8 @@ from app.services.youtube_service import (
     YouTubeIngestionError,
     ingest_youtube,
     remove_youtube_from_retriever,
-    INGEST_LIMITER,
 )
+from app.core.worker_limits import VECTOR_LIMITER
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +283,7 @@ async def delete_youtube_source(
 
     try:
         await anyio.to_thread.run_sync(
-            remove_youtube_from_retriever, youtube_source_id, limiter=INGEST_LIMITER
+            remove_youtube_from_retriever, youtube_source_id, limiter=VECTOR_LIMITER
         )
     except YouTubeIngestionError as exc:
         raise HTTPException(

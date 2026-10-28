@@ -7,13 +7,15 @@ asyncpg>=0.29,<1.0
 aiosqlite>=0.20,<1.0
 alembic>=1.13,<2.0
 redis>=5.0,<6.0
-chromadb>=0.5,<1.0
+chromadb>=0.6.3,<0.7
 # Keep the RAG integrations and their shared interfaces on the 0.3 release family.
 langchain>=0.3,<1.0
 langchain-core>=0.3,<1.0
 langchain-text-splitters>=0.3,<1.0
 langchain-groq>=0.3,<0.4
 langchain-community>=0.3,<0.4
+# 0.2.2 supports the existing Chroma 0.6 / LangChain Core 0.3 schema family.
+langchain-chroma>=0.2.2,<0.2.3
 langgraph>=0.2,<1.0
 python-jose[cryptography]>=3.3,<4.0
 passlib[argon2]>=1.7,<2.0

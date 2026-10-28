@@ -44,7 +44,7 @@ def vector_store(storage, tmp_path, monkeypatch):
 async def stored_document(owner, text="original"):
     document = await service.upload_document(b"safe content", "test.txt", "text/plain", owner.id)
     chunks = [DocumentChunk(index=0, content=text), DocumentChunk(index=1, content="tail")]
-    await service.store_document(document, chunks, [[0.1], [0.2]], EmbeddingConfig())
+    await service.store_document(document, chunks, [[0.1, 1., 0.], [0.2, 1., 0.]], EmbeddingConfig())
     return document
 
 
@@ -61,7 +61,7 @@ async def test_reprocessing_purges_old_tail_and_preserves_other_documents(databa
     })
     chunks = [DocumentChunk(index=0, content="replacement")]
     for _ in range(2):
-        await service.store_document(first, chunks, [[0.3]], EmbeddingConfig())
+        await service.store_document(first, chunks, [[0.3, 1., 0.]], EmbeddingConfig())
     assert vectors(vector_store, first)["documents"] == ["replacement"]
     assert len(vectors(vector_store, other)["ids"]) == 2
     async with database.factory() as session:
@@ -122,7 +122,7 @@ async def test_vector_failures_restore_snapshot_and_sql(database, owner, vector_
 
         monkeypatch.setattr(vector_store, "add_document_chunks", fail_after_write)
         with pytest.raises(service.DocumentProcessingError):
-            await service.store_document(document, [DocumentChunk(index=0, content="new")], [[0.9]], EmbeddingConfig())
+            await service.store_document(document, [DocumentChunk(index=0, content="new")], [[0.9, 1., 0.]], EmbeddingConfig())
     assert vectors(vector_store, document)["documents"] == original["documents"]
     assert vectors(vector_store, document)["embeddings"].tolist() == original["embeddings"].tolist()
     assert service.resolve_storage_key(storage, document.storage_key).exists()
@@ -146,7 +146,7 @@ async def test_sql_commit_failure_restores_vectors(database, owner, vector_store
                     await routes.delete_document(document.id, owner, session)
         else:
             with pytest.raises(service.DocumentProcessingError):
-                await service.store_document(document, [DocumentChunk(index=0, content="new")], [[0.9]], EmbeddingConfig())
+                await service.store_document(document, [DocumentChunk(index=0, content="new")], [[0.9, 1., 0.]], EmbeddingConfig())
     finally:
         event.remove(database.engine.sync_engine, "commit", fail_commit)
     assert set(vectors(vector_store, document)["documents"]) == {"original", "tail"}
