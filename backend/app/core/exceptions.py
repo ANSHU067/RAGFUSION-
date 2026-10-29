@@ -42,6 +42,15 @@ class NotFoundError(AppException):
         )
 
 
+class GroqConfigurationError(AppException):
+    """Provider credentials failed; this is not a user-session authentication error."""
+
+    def __init__(self):
+        super().__init__(
+            "LLM configuration error: Invalid Groq API key on server", status_code=502,
+        )
+
+
 class ConflictError(AppException):
     """Resource conflict (e.g., duplicate)."""
 
@@ -114,6 +123,7 @@ def create_exception_response(
     return JSONResponse(
         status_code=exc.status_code,
         content={
+            **({"detail": exc.message} if isinstance(exc, GroqConfigurationError) else {}),
             "error": {
                 "type": exc.__class__.__name__,
                 "message": exc.message,

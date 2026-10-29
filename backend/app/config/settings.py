@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 import os
+import logging
 from pathlib import Path
 
 from pydantic import AliasChoices, Field, field_validator
@@ -11,6 +12,37 @@ from app.config.branding_compat import LEGACY_ENV_PREFIX, LEGACY_DATABASE_URL, d
 
 def normalize_groq_api_key(value: str) -> str:
     return value.strip().strip('"').strip("'").strip()
+
+
+GROQ_KEY_ALIASES = ("RAGFUSION_GROQ_API_KEY", "DOCPRO_GROQ_API_KEY", "GROQ_API_KEY")
+
+
+def _with_groq_key_selection(source):
+    """Keep normal source precedence, but skip empty/invalid key aliases."""
+    def read():
+        data = source()
+        candidates = [normalize_groq_api_key(value) for alias in GROQ_KEY_ALIASES
+                      if isinstance(value := source.env_vars.get(
+                          alias if source.case_sensitive else alias.lower()), str)]
+        if candidates:
+            valid = [key for key in candidates if key.startswith("gsk_") and len(key) > 4]
+            selected = next(iter(valid or [key for key in candidates if key]), "")
+            for alias in (*GROQ_KEY_ALIASES, "groq_api_key"):
+                data.pop(alias, None)
+            data[GROQ_KEY_ALIASES[0]] = selected
+        return data
+    return read
+
+
+def configure_groq_environment(settings, *, log_status: bool = False) -> None:
+    os.environ["GROQ_API_KEY"] = settings.groq_api_key
+    if log_status:
+        logger = logging.getLogger(__name__)
+        if settings.groq_api_key.startswith("gsk_") and len(settings.groq_api_key) > 4:
+            # No characters from the secret itself are included in logs.
+            logger.info("Loaded Groq API key: gsk_****... (len=%d)", len(settings.groq_api_key))
+        else:
+            logger.warning("Groq API key missing or has an invalid format")
 
 
 class Settings(BaseSettings):
@@ -23,6 +55,12 @@ class Settings(BaseSettings):
         extra="ignore",
         populate_by_name=True,
     )
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
+                                   dotenv_settings, file_secret_settings):
+        return (init_settings, _with_groq_key_selection(env_settings),
+                _with_groq_key_selection(dotenv_settings), file_secret_settings)
 
     app_name: str = "RAGFUSION API"
     environment: str = "development"

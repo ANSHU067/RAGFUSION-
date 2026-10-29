@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.core.exceptions import AppException, NotFoundError
+from app.core.exceptions import AppException, NotFoundError, GroqConfigurationError
 from app.core.rag_config import get_rag_config
 from app.models.entities import (
     Document,
@@ -383,6 +383,8 @@ class ChatService:
 
         except asyncio.CancelledError:
             raise
+        except GroqConfigurationError as exc:
+            yield StreamChunk(type="error", error=exc.message)
         except Exception as exc:
             logger.error("Error in chat stream", exc_info=True)
             yield StreamChunk(type="error", error="Chat generation failed")

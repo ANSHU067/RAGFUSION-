@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from app.api.routes import router
-from app.config.settings import get_settings
+from app.config.settings import get_settings, configure_groq_environment
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.performance import PerformanceMiddleware
@@ -68,6 +68,7 @@ def create_app(*, rate_limiter: RateLimiter | None = None) -> FastAPI:
 
     @app.on_event("startup")
     async def warm_embedding_model() -> None:
+        configure_groq_environment(settings, log_status=True)
         if settings.embedding_warmup:
             from app.core.embedding_runtime import MODEL_LIMITER, get_embedding_model
 

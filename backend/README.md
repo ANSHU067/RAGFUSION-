@@ -182,8 +182,14 @@ Use one Uvicorn worker on the free tier; separate processes cannot share that
 in-memory instance. Other local embedding spaces are rejected rather than
 evicting MiniLM or mixing incompatible vectors.
 
-YouTube requests have a 20-second read timeout, a browser User-Agent, and one
-retry for read timeouts/connection errors across the complete fetch session.
+YouTube requests retain the transcript library's native headers, with a
+20-second read timeout and one retry for read timeouts/connection errors across
+the complete fetch session. Missing English captions fall back to any available
+manual transcript, then auto-generated captions. An HTTP 403 triggers one
+lightweight public watch-page `captionTracks` extraction attempt. The fallback
+only fetches HTTPS YouTube watch/caption endpoints, disables redirects, and caps
+each response at 2 MiB; it does not download videos or run a browser. It cannot
+guarantee recovery when YouTube blocks the host's IP across both endpoints.
 The overall transcript deadline is 60 seconds, including fallback and retries;
 the two-worker socket concurrency guard remains active after cancellation.
 
@@ -194,8 +200,17 @@ second can also mean Redis is unavailable: inspect the sanitized response and
 server logs before attributing it to Neon. Redis remains fail-closed.
 
 Groq credentials accept `RAGFUSION_GROQ_API_KEY`, `DOCPRO_GROQ_API_KEY`, or
-`GROQ_API_KEY`, in that order. Surrounding whitespace and quotes are stripped;
-the pipeline reads the validated settings, including `backend/.env`.
+`GROQ_API_KEY`. Within each environment/dotenv source, a non-empty `gsk_` key
+is preferred over empty or invalid aliases; that order breaks ties between
+valid keys. Explicit settings, environment variables, then `backend/.env`
+retain their usual precedence. Surrounding whitespace and quotes are stripped.
+The chosen server key is passed explicitly as `groq_api_key` to ChatGroq and
+published as `GROQ_API_KEY` for SDK compatibility. Startup logs only a constant
+masked prefix and length, which confirms presence/format, not remote validity.
+Groq authentication failures return HTTP 502 with
+`LLM configuration error: Invalid Groq API key on server` in `detail` and the
+standard error object; SSE sends the same safe error text. These failures do
+not invalidate the user's session or expose the provider's response body.
 
 A clean Python 3.11/macOS ARM64 validation on 17 October 2026 measured **157.7 MiB
 peak at API startup** and **316.34 MiB including the first real MiniLM inference**

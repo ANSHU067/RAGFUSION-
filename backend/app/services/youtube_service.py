@@ -29,6 +29,7 @@ from app.db.session import get_session_factory
 from app.models.entities import Embedding, SourceStatus, YouTubeSource
 from app.rag.retrievers.retriever_manager import RetrieverManager
 from app.services.embedding_helper import generate_embeddings
+from app.services.youtube_fallback import fetch_watch_page_captions, is_http_403
 
 from app.core.worker_limits import INGEST_LIMITER, VECTOR_LIMITER
 
@@ -259,10 +260,6 @@ class TranscriptSession(HTTPSession):
         self.deadline = deadline
         self.max_redirects = 3
         self._retries_remaining = 1
-        self.headers.update({"User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-        )})
 
     def send(self, request, **kwargs):
         while True:
@@ -293,17 +290,21 @@ def _fetch_transcript_sync(video_id: str, languages: list[str], deadline: float)
             from youtube_transcript_api import NoTranscriptFound
 
             try:
-                transcript = api.fetch(video_id, languages=languages)
-            except NoTranscriptFound:
-                # Only language absence permits fallback. Disabled transcripts,
-                # timeouts and provider failures must not trigger more requests.
-                available = list(api.list(video_id))
-                if time.monotonic() >= deadline:
-                    raise HTTPTimeout("Transcript deadline exceeded")
-                if not available:
-                    raise YouTubeIngestionError("No transcript found", code="TRANSCRIPT_NOT_FOUND")
-                manual = [item for item in available if not item.is_generated]
-                transcript = (manual or available)[0].fetch()
+                try:
+                    transcript = api.fetch(video_id, languages=languages)
+                except NoTranscriptFound:
+                    available = list(api.list(video_id))
+                    if time.monotonic() >= deadline:
+                        raise HTTPTimeout("Transcript deadline exceeded")
+                    if not available:
+                        raise YouTubeIngestionError("No transcript found", code="TRANSCRIPT_NOT_FOUND")
+                    manual = [item for item in available if not item.is_generated]
+                    transcript = (manual or available)[0].fetch()
+            except Exception as exc:
+                if not is_http_403(exc):
+                    raise
+                logger.info("YouTube player returned 403; trying public watch-page captions")
+                return clean_transcript_text(fetch_watch_page_captions(http, video_id, languages, deadline))
             if time.monotonic() >= deadline:
                 raise HTTPTimeout("Transcript deadline exceeded")
             parts = [item.text if hasattr(item, "text") else item.get("text", "") for item in transcript]

@@ -6,7 +6,8 @@ import logging
 import math
 from typing import Any, Dict, List, NotRequired, Optional, Protocol, TypedDict, cast
 
-from app.config.settings import get_settings, normalize_groq_api_key
+from app.config.settings import get_settings, normalize_groq_api_key, configure_groq_environment
+from app.core.exceptions import GroqConfigurationError
 from app.core.rag_config import get_rag_config
 from app.rag.embeddings.embedding_manager import EmbeddingManager
 from app.rag.prompts.prompt_builder import PromptBuilder
@@ -61,7 +62,9 @@ class RAGPipeline:
         rag_config = get_rag_config()
 
         # Get API key
-        api_key = normalize_groq_api_key(api_key) if api_key is not None else get_settings().groq_api_key
+        settings = get_settings()
+        configure_groq_environment(settings)
+        api_key = normalize_groq_api_key(api_key) if api_key is not None else settings.groq_api_key
 
         if not api_key:
             raise ValueError(
@@ -73,7 +76,7 @@ class RAGPipeline:
 
         self.llm = ChatGroq(
             model=llm_model or "openai/gpt-oss-120b",
-            api_key=api_key,
+            groq_api_key=api_key,
             temperature=rag_config.temperature if temperature is None else temperature,
             max_tokens=rag_config.max_tokens if max_tokens is None else max_tokens,
         )
@@ -546,7 +549,13 @@ class RAGPipeline:
 
         # Generate response with request-level settings. In particular, 0.0 is
         # a valid temperature and must not be replaced by a default.
-        response = self.llm.invoke(lc_messages, **generation_kwargs)
+        from groq import AuthenticationError
+
+        try:
+            response = self.llm.invoke(lc_messages, **generation_kwargs)
+        except AuthenticationError as exc:
+            logger.warning("Groq authentication failed; check the server API key")
+            raise GroqConfigurationError() from exc
         response_text = response.content if isinstance(response.content, str) else str(response.content)
 
         return {

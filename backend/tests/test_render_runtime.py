@@ -106,6 +106,7 @@ def test_groq_canonical_key_has_precedence(monkeypatch):
 
 
 def test_pipeline_uses_cleaned_settings_key(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "")
     from app.rag.pipelines import rag_pipeline
     import langchain_groq
     llm = Mock()
@@ -116,9 +117,10 @@ def test_pipeline_uses_cleaned_settings_key(monkeypatch):
     monkeypatch.setattr(rag_pipeline, "RetrieverManager", Mock())
     monkeypatch.setattr(rag_pipeline.RAGPipeline, "_build_graph", Mock())
     rag_pipeline.RAGPipeline()
-    assert llm.call_args.kwargs["api_key"] == "gsk_configured"
+    assert llm.call_args.kwargs["groq_api_key"] == "gsk_configured"
+    assert os.environ["GROQ_API_KEY"] == "gsk_configured"
     rag_pipeline.RAGPipeline(api_key=" 'gsk_override' ")
-    assert llm.call_args.kwargs["api_key"] == "gsk_override"
+    assert llm.call_args.kwargs["groq_api_key"] == "gsk_override"
 
 
 def test_postgres_connection_gets_cold_start_budget_without_changing_sqlite(monkeypatch):
@@ -144,12 +146,12 @@ def test_database_timeout_cannot_be_configured_below_ten_seconds():
 
 
 @pytest.mark.parametrize("failure", [ReadTimeout, ConnectionError])
-def test_transcript_retries_network_errors_once_with_browser_headers(monkeypatch, failure):
+def test_transcript_retries_network_errors_once_with_native_headers(monkeypatch, failure):
     clock = [0.0]
     calls = []
     def send(self, request, **kwargs):
         calls.append(kwargs["timeout"])
-        assert "Mozilla/5.0" in request.headers["User-Agent"]
+        assert request.headers["User-Agent"] == "native-library-header"
         if len(calls) == 1:
             clock[0] += 20
             raise failure("Temporary upstream error")
@@ -158,6 +160,8 @@ def test_transcript_retries_network_errors_once_with_browser_headers(monkeypatch
     monkeypatch.setattr(youtube.time, "sleep", lambda _: None)
     monkeypatch.setattr(youtube.HTTPSession, "send", send)
     with youtube.TranscriptSession(60) as session:
+        # A header set by the transcript client must survive our timeout layer.
+        session.headers["User-Agent"] = "native-library-header"
         request = session.prepare_request(Request("GET", "https://www.youtube.com/watch?v=test"))
         assert session.send(request) == "transcript response"
     assert len(calls) == 2
