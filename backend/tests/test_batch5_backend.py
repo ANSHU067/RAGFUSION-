@@ -203,9 +203,11 @@ def test_transcript_socket_deadlines_and_disabled_transcripts_do_not_retry(monke
     from app.services import youtube_service as youtube
     captured = []
     monkeypatch.setattr(youtube.HTTPSession, "send", lambda self, request, **kwargs: captured.append(kwargs))
-    with youtube.TranscriptSession(time.monotonic() + 10) as session:
+    with youtube.TranscriptSession(time.monotonic() + 60) as session:
         session.send(object(), timeout=None)
-    assert captured[0]["timeout"] == (3.0, 5.0)
+    assert captured[0]["timeout"].connect_timeout == 5.0
+    assert captured[0]["timeout"].read_timeout == 20.0
+    assert 0 < captured[0]["timeout"].total <= 60
     calls = []
 
     class NoTranscriptFound(Exception):

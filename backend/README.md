@@ -168,12 +168,34 @@ python -m pytest tests/ -q
 python -m pip check
 ```
 
-The existing semantic/recursive document-parser tests also need their language
-resources. For the resolved Unstructured 0.27.x dependency, provision the small
-English parser model once with `python -m spacy download en_core_web_sm` before
-running offline tests. The Docker image includes that parser model with a
-SHA-256-verified download. This resource is separate from the MiniLM ONNX cache
-and is not loaded during API boot.
+Document ingestion uses PyMuPDF for PDF, python-docx for DOCX, and ordinary text
+reading for TXT/Markdown. Cleaning and chunking do not import Unstructured or
+spaCy or download language models. Recursive chunking prefers paragraphs and
+words; the `semantic` option uses paragraph/sentence boundaries without an NLP
+model. Character, page, expanded-DOCX and chunk limits still apply. Scanned PDFs
+without embedded text require external OCR; they are not automatically sent to
+a heavyweight OCR/parser fallback.
+
+Query retrieval and ingestion share one MiniLM ONNX instance and cache directory
+per process, including canonical, short, and Qdrant download-repository aliases.
+Use one Uvicorn worker on the free tier; separate processes cannot share that
+in-memory instance. Other local embedding spaces are rejected rather than
+evicting MiniLM or mixing incompatible vectors.
+
+YouTube requests have a 20-second read timeout, a browser User-Agent, and one
+retry for read timeouts/connection errors across the complete fetch session.
+The overall transcript deadline is 60 seconds, including fallback and retries;
+the two-worker socket concurrency guard remains active after cancellation.
+
+PostgreSQL retains pool pre-ping and uses
+`RAGFUSION_DATABASE_CONNECT_TIMEOUT_SECONDS=20` (minimum 10). This is a connection
+deadline, not a retry of a transaction or write. A 503 after approximately one
+second can also mean Redis is unavailable: inspect the sanitized response and
+server logs before attributing it to Neon. Redis remains fail-closed.
+
+Groq credentials accept `RAGFUSION_GROQ_API_KEY`, `DOCPRO_GROQ_API_KEY`, or
+`GROQ_API_KEY`, in that order. Surrounding whitespace and quotes are stripped;
+the pipeline reads the validated settings, including `backend/.env`.
 
 A clean Python 3.11/macOS ARM64 validation on 17 October 2026 measured **157.7 MiB
 peak at API startup** and **316.34 MiB including the first real MiniLM inference**

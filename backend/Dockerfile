@@ -39,12 +39,6 @@ RUN python -m pip install --user --no-cache-dir --upgrade pip \
 # Download at build time, then verify the same cache loads without networking.
 RUN python -c "import os; from fastembed import TextEmbedding; name = 'sentence-transformers/all-MiniLM-L6-v2'; cache = os.environ['RAGFUSION_EMBEDDING_CACHE_DIR']; TextEmbedding(model_name=name, cache_dir=cache, threads=1); model = TextEmbedding(model_name=name, cache_dir=cache, threads=1, local_files_only=True); assert len(next(model.embed(['cache verification'], batch_size=1))) == 384"
 
-# The existing Unstructured parser also needs language data. Install it into
-# the user's site-packages at build time, not into a read-only runtime prefix.
-RUN python -m pip install --user --no-cache-dir \
-    "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85" \
-    && python -m pip check
-
 COPY --chown=1000:1000 . /app/
 RUN chmod 755 /app/entrypoint.sh
 

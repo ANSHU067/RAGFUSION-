@@ -12,6 +12,7 @@ from fastapi import status
 from fastapi.testclient import TestClient
 
 from app.models.entities import User
+from app.core.ingestion_limits import MAX_EXTRACTED_CHARACTERS
 from app.schemas.document import DocumentFormat
 from app.services.document import (
     DocumentValidationError,
@@ -449,13 +450,18 @@ class TestLargeFiles:
     def test_large_txt_processing(self, tmp_path: Path):
         """Test processing of large text file."""
         large_file = tmp_path / "large.txt"
-        # Create ~10MB file
-        content = "A" * (10 * 1024 * 1024)
+        content = "A" * MAX_EXTRACTED_CHARACTERS
         large_file.write_bytes(content.encode("utf-8"))
 
         text, metadata = extract_text(large_file, DocumentFormat.txt)
-        assert len(text) == 10 * 1024 * 1024
-        assert metadata.character_count == 10 * 1024 * 1024
+        assert len(text) == MAX_EXTRACTED_CHARACTERS
+        assert metadata.character_count == MAX_EXTRACTED_CHARACTERS
+        # Enforce the existing extraction ceiling before allocating/cleaning
+        # an oversized result, rather than waiting until chunking.
+        large_file.write_bytes((content + "A").encode("utf-8"))
+        with pytest.raises(DocumentValidationError) as error:
+            extract_text(large_file, DocumentFormat.txt)
+        assert error.value.code == "EXTRACTION_LIMIT"
 
     def test_chunking_large_text(self):
         """Test chunking handles large text."""

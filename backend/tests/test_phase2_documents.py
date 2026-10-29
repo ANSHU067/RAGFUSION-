@@ -256,15 +256,13 @@ def test_fixed_chunks_accept_exact_limit_and_reject_one_more():
     assert failed.value.code == "TOO_MANY_CHUNKS"
 
 
-@pytest.mark.parametrize("strategy,module,function", [
-    ("semantic", "unstructured.chunking.title", "chunk_by_title"),
-    ("recursive", "unstructured.chunking.basic", "chunk_elements"),
-])
-def test_unstructured_chunk_limits(monkeypatch, strategy, module, function):
-    monkeypatch.setattr(service, "partition_text", lambda **kwargs: [])
-    monkeypatch.setattr(f"{module}.{function}", lambda *args, **kwargs: ["chunk"] * (MAX_DOCUMENT_CHUNKS + 1))
+@pytest.mark.parametrize("strategy", ["semantic", "recursive"])
+def test_structural_chunk_limits(strategy):
+    config = ChunkingConfig(strategy=strategy, chunk_size=100, chunk_overlap=0)
+    text = "x" * (400 * MAX_DOCUMENT_CHUNKS)
+    assert len(service.chunk_text(text, config)) == MAX_DOCUMENT_CHUNKS
     with pytest.raises(service.DocumentValidationError) as failed:
-        service.chunk_text("text", ChunkingConfig(strategy=strategy))
+        service.chunk_text(text + "x", config)
     assert failed.value.code == "TOO_MANY_CHUNKS"
 
 

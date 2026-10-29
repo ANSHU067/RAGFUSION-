@@ -79,6 +79,23 @@ def test_gpu_request_is_rejected_without_loading(encoder):
     assert encoder == []
 
 
+def test_model_aliases_across_concurrent_callers_share_one_instance(encoder):
+    from concurrent.futures import ThreadPoolExecutor
+    aliases = [runtime.MODEL_NAME, "all-minilm-l6-v2", "Qdrant/all-MiniLM-L6-v2-onnx"] * 4
+    with ThreadPoolExecutor(max_workers=6) as workers:
+        models = list(workers.map(runtime.get_embedding_model, aliases))
+    assert all(model is models[0] for model in models)
+    assert len([call for call in encoder if call[0] == "load"]) == 1
+
+
+def test_other_model_cannot_evict_the_shared_embedding_space(encoder):
+    original = runtime.get_embedding_model()
+    with pytest.raises(ValueError, match="Only the shared MiniLM"):
+        runtime.get_embedding_model("BAAI/bge-base-en-v1.5")
+    assert runtime.get_embedding_model() is original
+    assert len([call for call in encoder if call[0] == "load"]) == 1
+
+
 def test_default_settings_allow_downloads_to_standard_cache(monkeypatch, tmp_path):
     from app.config.branding_compat import LEGACY_ENV_PREFIX
 

@@ -5,6 +5,7 @@ from app.rag.retrievers.retriever_manager import RetrieverManager
 import hashlib
 import codecs
 import logging
+import re
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
@@ -399,7 +400,7 @@ def extract_text_txt(file_path: Path) -> tuple[str, DocumentMetadata]:
     for encoding in encodings:
         try:
             with open(file_path, "r", encoding=encoding) as f:
-                text = f.read()
+                text = f.read(MAX_EXTRACTED_CHARACTERS + 1)
             break
         except UnicodeDecodeError:
             continue
@@ -407,7 +408,10 @@ def extract_text_txt(file_path: Path) -> tuple[str, DocumentMetadata]:
     if text is None:
         # Last resort: read as binary and decode with replacement
         with open(file_path, "rb") as f:
-            text = f.read().decode("utf-8", errors="replace")
+            text = f.read(MAX_EXTRACTED_CHARACTERS + 1).decode("utf-8", errors="replace")
+
+    if len(text) > MAX_EXTRACTED_CHARACTERS:
+        raise DocumentValidationError("Extracted text exceeds limit", code="EXTRACTION_LIMIT")
 
     metadata.word_count = len(text.split())
     metadata.character_count = len(text)
@@ -453,8 +457,10 @@ def extract_text_markdown(file_path: Path) -> tuple[str, DocumentMetadata]:
     """Extract text from Markdown file."""
     metadata = DocumentMetadata(format=DocumentFormat.markdown)
 
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        text = f.read()
+    with open(file_path, "r", encoding="utf-8-sig", errors="replace") as f:
+        text = f.read(MAX_EXTRACTED_CHARACTERS + 1)
+    if len(text) > MAX_EXTRACTED_CHARACTERS:
+        raise DocumentValidationError("Extracted text exceeds limit", code="EXTRACTION_LIMIT")
 
     metadata.word_count = len(text.split())
     metadata.character_count = len(text)
@@ -483,25 +489,39 @@ def extract_text(
     return extractor(file_path)
 
 
-def partition_text(**kwargs):
-    """Load the text parser only in the ingestion worker that needs it."""
-    from unstructured.partition.text import partition_text as partition
-
-    return partition(**kwargs)
-
-
 def clean_text(text: str) -> str:
-    """Clean extracted text using unstructured cleaners."""
-    from unstructured.cleaners.core import clean
+    """Normalize whitespace without loading NLP models or removing punctuation."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
+    text = re.sub(r"[^\S\n]+", " ", text)
+    text = re.sub(r"(?m)^ *[•●○▪■] *", "- ", text)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
-    cleaned = clean(
-        text,
-        bullets=True,
-        extra_whitespace=True,
-        dashes=True,
-        trailing_punctuation=True,
-    )
-    return cleaned
+
+def _bounded_text_chunks(text: str, size: int, overlap: int, strategy: str):
+    """Yield bounded windows, preferring paragraph/sentence or word boundaries.
+
+    The semantic strategy is structural (paragraphs and sentences), not an NLP
+    model. Every window makes forward progress, including unbroken long strings.
+    """
+    separators = ("\n\n", ". ", "? ", "! ", "\n", " ") if strategy == "semantic" else ("\n\n", "\n", " ")
+    start = 0
+    while start < len(text):
+        end = min(start + size, len(text))
+        if end < len(text):
+            # Avoid tiny windows when a separator occurs near the start.
+            minimum = start + max(overlap + 1, size // 2)
+            for separator in separators:
+                boundary = text.rfind(separator, minimum, end)
+                if boundary >= minimum:
+                    end = boundary + len(separator)
+                    break
+        chunk = text[start:end].strip()
+        if chunk:
+            yield chunk
+        if end == len(text):
+            break
+        start = end - overlap
 
 
 def chunk_text(
@@ -509,59 +529,22 @@ def chunk_text(
     config: ChunkingConfig,
     metadata: DocumentMetadata | None = None,
 ) -> list[DocumentChunk]:
-    """
-    Chunk text into smaller pieces.
-
-    Uses unstructured's chunk_by_title for semantic chunking,
-    with fallback to fixed-size chunking.
-    """
+    """Chunk extracted text without Unstructured, spaCy, or runtime downloads."""
     chunks = []
     if len(text) > MAX_EXTRACTED_CHARACTERS:
         raise DocumentValidationError("Extracted text exceeds limit", code="EXTRACTION_LIMIT")
 
-    if config.strategy == "semantic":
-        # Use unstructured's semantic chunking
-        from unstructured.chunking.title import chunk_by_title
-
-        elements = partition_text(text=text)
-        chunked_elements = chunk_by_title(
-            elements,
-            max_characters=config.chunk_size * 4,  # Approximate chars per token
-            overlap=config.chunk_overlap * 4,
-        )
-
-        for i, element in enumerate(chunked_elements):
+    if config.strategy in {"semantic", "recursive"}:
+        for i, chunk in enumerate(_bounded_text_chunks(
+            text, config.chunk_size * 4, config.chunk_overlap * 4, config.strategy,
+        )):
             _check_chunk_limit(i + 1)
-            chunk_text = str(element)
             chunks.append(
                 DocumentChunk(
                     index=i,
-                    content=chunk_text,
-                    token_count=int(len(chunk_text.split()) * 1.3),  # Rough estimate
-                    metadata={"strategy": "semantic"},
-                )
-            )
-
-    elif config.strategy == "recursive":
-        # Recursive character text splitter (similar to LangChain)
-        from unstructured.chunking.basic import chunk_elements
-
-        elements = partition_text(text=text)
-        chunked_elements = chunk_elements(
-            elements,
-            max_characters=config.chunk_size * 4,
-            overlap=config.chunk_overlap * 4,
-        )
-
-        for i, element in enumerate(chunked_elements):
-            _check_chunk_limit(i + 1)
-            chunk_text = str(element)
-            chunks.append(
-                DocumentChunk(
-                    index=i,
-                    content=chunk_text,
-                    token_count=int(len(chunk_text.split()) * 1.3),
-                    metadata={"strategy": "recursive"},
+                    content=chunk,
+                    token_count=max(1, len(chunk) // 4),
+                    metadata={"strategy": config.strategy},
                 )
             )
 

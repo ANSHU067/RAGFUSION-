@@ -110,141 +110,47 @@ def chunk_text_fixed(
     return chunks
 
 
-def chunk_text_recursive(
-    text: str,
-    config: WebsiteChunkingConfig,
-    source_url: str,
+def _structural_chunks(
+    text: str, config: WebsiteChunkingConfig, source_url: str, strategy: str,
 ) -> list[WebsiteChunk]:
-    """
-    Recursive character text splitting (similar to LangChain's RecursiveCharacterTextSplitter).
+    """Use the same bounded, model-free chunker as document ingestion."""
+    from app.schemas.document import ChunkingConfig
+    from app.services.document import chunk_text
 
-    Args:
-        text: Text to chunk
-        config: Chunking configuration
-        source_url: Source URL for chunks
+    chunks = chunk_text(text, ChunkingConfig(
+        chunk_size=config.chunk_size, chunk_overlap=config.chunk_overlap,
+        strategy=strategy,
+    ))
+    return [WebsiteChunk(
+        index=chunk.index, content=chunk.content, token_count=chunk.token_count,
+        source_url=source_url, metadata=chunk.metadata,
+    ) for chunk in chunks]
 
-    Returns:
-        List of WebsiteChunk objects
-    """
-    from unstructured.chunking.basic import chunk_elements
-    from unstructured.partition.text import partition_text
 
-    # Use unstructured's basic chunking
-    elements = partition_text(text=text)
-    chunked_elements = chunk_elements(
-        elements,
-        max_characters=config.chunk_size * 4,
-        overlap=config.chunk_overlap * 4,
-    )
-
-    chunks = []
-    for i, element in enumerate(chunked_elements):
-        chunk_text = str(element)
-        if chunk_text.strip():
-            chunks.append(
-                WebsiteChunk(
-                    index=i,
-                    content=chunk_text,
-                    token_count=estimate_tokens(chunk_text),
-                    source_url=source_url,
-                    metadata={"strategy": "recursive"},
-                )
-            )
-
-    return chunks
+def chunk_text_recursive(
+    text: str, config: WebsiteChunkingConfig, source_url: str,
+) -> list[WebsiteChunk]:
+    return _structural_chunks(text, config, source_url, "recursive")
 
 
 def chunk_text_semantic(
-    text: str,
-    config: WebsiteChunkingConfig,
-    source_url: str,
+    text: str, config: WebsiteChunkingConfig, source_url: str,
 ) -> list[WebsiteChunk]:
-    """
-    Semantic chunking based on document structure (titles, headings).
-
-    Args:
-        text: Text to chunk
-        config: Chunking configuration
-        source_url: Source URL for chunks
-
-    Returns:
-        List of WebsiteChunk objects
-    """
-    from unstructured.chunking.title import chunk_by_title
-    from unstructured.partition.text import partition_text
-
-    elements = partition_text(text=text)
-    chunked_elements = chunk_by_title(
-        elements,
-        max_characters=config.chunk_size * 4,
-        overlap=config.chunk_overlap * 4,
-    )
-
-    chunks = []
-    for i, element in enumerate(chunked_elements):
-        chunk_text = str(element)
-        if chunk_text.strip():
-            chunks.append(
-                WebsiteChunk(
-                    index=i,
-                    content=chunk_text,
-                    token_count=estimate_tokens(chunk_text),
-                    source_url=source_url,
-                    metadata={"strategy": "semantic"},
-                )
-            )
-
-    return chunks
+    return _structural_chunks(text, config, source_url, "semantic")
 
 
 def chunk_html_semantic(
-    html: str,
-    config: WebsiteChunkingConfig,
-    source_url: str,
+    html: str, config: WebsiteChunkingConfig, source_url: str,
 ) -> list[WebsiteChunk]:
-    """
-    Semantic chunking of HTML content preserving structure.
+    """Extract visible HTML text without NLP or external resource downloads."""
+    from bs4 import BeautifulSoup
 
-    Args:
-        html: HTML content to chunk
-        config: Chunking configuration
-        source_url: Source URL for chunks
-
-    Returns:
-        List of WebsiteChunk objects
-    """
-    from unstructured.chunking.title import chunk_by_title
-    from unstructured.partition.html import partition_html
-
-    elements = partition_html(text=html)
-    chunked_elements = chunk_by_title(
-        elements,
-        max_characters=config.chunk_size * 4,
-        overlap=config.chunk_overlap * 4,
-    )
-
-    chunks = []
-    for i, element in enumerate(chunked_elements):
-        chunk_text = str(element)
-        if chunk_text.strip():
-            # Extract metadata from element
-            elem_metadata = {"strategy": "semantic_html"}
-            if hasattr(element, "metadata") and element.metadata:
-                if hasattr(element.metadata, "category"):
-                    elem_metadata["category"] = element.metadata.category
-                if hasattr(element.metadata, "section"):
-                    elem_metadata["section"] = element.metadata.section
-
-            chunks.append(
-                WebsiteChunk(
-                    index=i,
-                    content=chunk_text,
-                    token_count=estimate_tokens(chunk_text),
-                    source_url=source_url,
-                    metadata=elem_metadata,
-                )
-            )
-
+    soup = BeautifulSoup(html, "html.parser")
+    for element in soup(["script", "style", "noscript", "head"]):
+        element.decompose()
+    chunks = chunk_text_semantic(soup.get_text(separator="\n\n", strip=True), config, source_url)
+    for chunk in chunks:
+        chunk.metadata["strategy"] = "semantic_html"
     return chunks
 
 

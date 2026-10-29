@@ -185,17 +185,11 @@ class FastEmbedProvider(BaseEmbeddingProvider):
     """ONNX embeddings using the same bounded singleton as query retrieval."""
 
     async def _generate_embeddings(self, texts: List[str]) -> np.ndarray:
-        from functools import partial
-
-        import anyio
-        from app.core.embedding_runtime import MODEL_LIMITER, embed_texts
+        from app.core.embedding_runtime import SharedEmbeddings
 
         if self.config.device != "cpu":
             raise ValueError("The lightweight embedding runtime requires device='cpu'")
-        embeddings = await anyio.to_thread.run_sync(
-            partial(embed_texts, texts, self.config.model_name),
-            limiter=MODEL_LIMITER,
-        )
+        embeddings = await SharedEmbeddings(self.config.model_name).aembed_documents(texts)
         return np.asarray(embeddings, dtype=np.float32)
 
 

@@ -9,6 +9,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.config.branding_compat import LEGACY_ENV_PREFIX, LEGACY_DATABASE_URL, default_upload_dir, display_brand
 
 
+def normalize_groq_api_key(value: str) -> str:
+    return value.strip().strip('"').strip("'").strip()
+
+
 class Settings(BaseSettings):
     """Runtime settings for the API and its backing services."""
 
@@ -29,6 +33,11 @@ class Settings(BaseSettings):
         default=LEGACY_DATABASE_URL,
         validation_alias=AliasChoices("RAGFUSION_DATABASE_URL", "DATABASE_URL"),
         min_length=1,
+    )
+    database_connect_timeout_seconds: float = Field(default=20.0, ge=10, le=120)
+    groq_api_key: str = Field(
+        default="", repr=False,
+        validation_alias=AliasChoices("RAGFUSION_GROQ_API_KEY", "DOCPRO_GROQ_API_KEY", "GROQ_API_KEY"),
     )
     redis_url: str = "redis://redis:6379/0"
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8000", "http://127.0.0.1:8000"])
@@ -59,6 +68,11 @@ class Settings(BaseSettings):
         default_factory=default_upload_dir, description="Directory for uploaded files"
     )
     max_file_size_mb: int = Field(default=15, gt=0, description="Document size in MiB; hard ceiling 15 MiB")
+
+    @field_validator("groq_api_key", mode="before")
+    @classmethod
+    def clean_groq_api_key(cls, value):
+        return normalize_groq_api_key(value) if isinstance(value, str) else value
 
     @field_validator('app_name')
     @classmethod

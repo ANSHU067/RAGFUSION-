@@ -2,21 +2,15 @@
 
 This module implements the complete RAG workflow using LangGraph's state management.
 """
-import os
 import logging
 import math
-from pathlib import Path
 from typing import Any, Dict, List, NotRequired, Optional, Protocol, TypedDict, cast
 
-from dotenv import load_dotenv
-
+from app.config.settings import get_settings, normalize_groq_api_key
 from app.core.rag_config import get_rag_config
 from app.rag.embeddings.embedding_manager import EmbeddingManager
 from app.rag.prompts.prompt_builder import PromptBuilder
 from app.rag.retrievers.retriever_manager import RetrieverManager
-
-# Load backend/.env regardless of the directory from which Uvicorn is started
-load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +61,7 @@ class RAGPipeline:
         rag_config = get_rag_config()
 
         # Get API key
-        api_key = api_key or os.getenv("GROQ_API_KEY")
+        api_key = normalize_groq_api_key(api_key) if api_key is not None else get_settings().groq_api_key
 
         if not api_key:
             raise ValueError(

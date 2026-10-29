@@ -10,6 +10,9 @@ from langchain_core.embeddings import Embeddings
 from app.config.settings import get_settings
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+_MODEL_ALIASES = {
+    MODEL_NAME.lower(), "all-minilm-l6-v2", "qdrant/all-minilm-l6-v2-onnx",
+}
 MODEL_LIMITER = anyio.CapacityLimiter(1)
 _load_lock = RLock()
 _inference_lock = RLock()
@@ -37,9 +40,13 @@ def _load_model(model_name: str):
 def get_embedding_model(model_name: str = MODEL_NAME, device: str = "cpu"):
     if device != "cpu":
         raise ValueError("The lightweight embedding runtime requires device='cpu'")
+    if model_name.strip().lower() not in _MODEL_ALIASES:
+        raise ValueError("Only the shared MiniLM 384-dimensional embedding model is supported")
+    # Canonicalize BEFORE the cache lookup so aliases cannot evict/reload the
+    # model. Qdrant is the ONNX download repository, not a separate model space.
     # lru_cache alone permits concurrent calls to initialize the same model.
     with _load_lock:
-        return _load_model(model_name)
+        return _load_model(MODEL_NAME)
 
 
 def embed_texts(texts: list[str], model_name: str = MODEL_NAME) -> list[list[float]]:

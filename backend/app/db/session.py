@@ -40,6 +40,10 @@ def get_async_engine(database_url: str | None = None) -> AsyncEngine:
 
     url = to_async_database_url(database_url or get_settings().database_url)
     connect_args = {"check_same_thread": False} if url.startswith("sqlite+") else {}
+    if url.startswith("postgresql+asyncpg:"):
+        # asyncpg's connection deadline includes DNS, TCP, TLS, and auth. Give
+        # sleeping managed Postgres instances time to wake; never replay writes.
+        connect_args["timeout"] = get_settings().database_connect_timeout_seconds
     # SQLite's async driver uses a different pool implementation and does not
     # accept QueuePool sizing arguments. Network databases benefit from bounded
     # pooled connections under burst traffic.

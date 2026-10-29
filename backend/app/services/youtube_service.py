@@ -14,6 +14,8 @@ from urllib.parse import parse_qs, urlparse
 import anyio
 from requests import Session as HTTPSession
 from requests.exceptions import Timeout as HTTPTimeout
+from requests.exceptions import ReadTimeout, ConnectionError as HTTPConnectionError
+from urllib3.util import Timeout as SocketTimeout
 
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
@@ -245,7 +247,7 @@ def build_chunks(
 
 
 logger = logging.getLogger(__name__)
-TRANSCRIPT_TIMEOUT = 20.0
+TRANSCRIPT_TIMEOUT = 60.0
 _TRANSCRIPT_WORKERS = threading.BoundedSemaphore(2)
 
 
@@ -256,13 +258,29 @@ class TranscriptSession(HTTPSession):
         super().__init__()
         self.deadline = deadline
         self.max_redirects = 3
+        self._retries_remaining = 1
+        self.headers.update({"User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+        )})
 
     def send(self, request, **kwargs):
-        remaining = self.deadline - time.monotonic()
-        if remaining <= 0:
-            raise HTTPTimeout("Transcript deadline exceeded")
-        kwargs["timeout"] = (min(3.0, remaining), min(5.0, remaining))
-        return super().send(request, **kwargs)
+        while True:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise HTTPTimeout("Transcript deadline exceeded")
+            kwargs["timeout"] = SocketTimeout(
+                total=remaining, connect=min(5.0, remaining), read=min(20.0, remaining),
+            )
+            try:
+                return super().send(request, **kwargs)
+            except (ReadTimeout, HTTPConnectionError):
+                # One retry across the complete session (including redirects
+                # and language fallback), not one unbounded retry per request.
+                if not self._retries_remaining or self.deadline - time.monotonic() <= 0.25:
+                    raise
+                self._retries_remaining -= 1
+                time.sleep(0.25)
 
 
 def _fetch_transcript_sync(video_id: str, languages: list[str], deadline: float) -> str:
@@ -298,7 +316,7 @@ def _fetch_transcript_sync(video_id: str, languages: list[str], deadline: float)
 
 
 async def fetch_transcript(video_id: str, languages: list[str] | None = None) -> str:
-    """Bound the entire preferred-language and fallback flow to twenty seconds."""
+    """Bound preferred language, one network retry, and fallback to sixty seconds."""
     if YouTubeTranscriptApi is None:
         raise YouTubeIngestionError("Transcript service unavailable", code="YOUTUBE_TRANSCRIPT_DEPENDENCY_MISSING")
     try:
