@@ -185,11 +185,17 @@ evicting MiniLM or mixing incompatible vectors.
 YouTube requests retain the transcript library's native headers, with a
 20-second read timeout and one retry for read timeouts/connection errors across
 the complete fetch session. Missing English captions fall back to any available
-manual transcript, then auto-generated captions. An HTTP 403 triggers one
-lightweight public watch-page `captionTracks` extraction attempt. The fallback
-only fetches HTTPS YouTube watch/caption endpoints, disables redirects, and caps
-each response at 2 MiB; it does not download videos or run a browser. It cannot
-guarantee recovery when YouTube blocks the host's IP across both endpoints.
+manual transcript, then auto-generated captions. `RequestBlocked`, `IpBlocked`,
+legacy `TooManyRequests`, and HTTP failures trigger one independent `httpx`
+watch-page extraction attempt with a randomly selected browser header profile.
+It parses player-response JSON without executing JavaScript and tries at most
+three distinct caption tracks, including alternate languages/automatic captions.
+The fallback only fetches HTTPS YouTube watch/caption endpoints, disables
+redirects, and caps each response at 2 MiB; it does not download videos or run a
+browser. It cannot guarantee recovery when YouTube blocks the host's IP across
+both endpoints. Exhausted fallback returns a sanitized 503 with `Retry-After: 60`,
+timeouts return 504, and other upstream fetch failures return 502 rather than
+400. No ready source is created when transcript retrieval fails.
 The overall transcript deadline is 60 seconds, including fallback and retries;
 the two-worker socket concurrency guard remains active after cancellation.
 

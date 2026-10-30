@@ -298,7 +298,10 @@ def test_trashed_session_returns_404_in_normal_chat_routes(client, auth_headers,
     assert all(item["id"] != session_id for item in result.json()["sessions"])
 
 
-@pytest.mark.parametrize("code,status", [("TRANSCRIPT_TIMEOUT", 504), ("TRANSCRIPT_FETCH_FAILED", 400)])
+@pytest.mark.parametrize("code,status", [
+    ("TRANSCRIPT_TIMEOUT", 504), ("TRANSCRIPT_FETCH_FAILED", 502),
+    ("TRANSCRIPT_UPSTREAM_UNAVAILABLE", 503), ("TRANSCRIPT_BUSY", 503),
+])
 def test_youtube_errors_have_safe_status_and_message(client, auth_headers, monkeypatch, code, status):
     from app.api import youtube
     monkeypatch.setattr(youtube, "ingest_youtube", AsyncMock(side_effect=youtube.YouTubeIngestionError(SECRET, code=code)))

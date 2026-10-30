@@ -77,9 +77,18 @@ async def ingest_youtube_route(
 
     except YouTubeIngestionError as e:
         logger.exception("YouTube ingestion failed")
+        error_status, message = {
+            "TRANSCRIPT_TIMEOUT": (504, "YouTube transcript request timed out"),
+            "TRANSCRIPT_UPSTREAM_UNAVAILABLE": (
+                503, "YouTube blocked access or captions are unavailable from this server. Try later or upload a transcript file.",
+            ),
+            "TRANSCRIPT_BUSY": (503, "YouTube transcript service is busy. Try again later."),
+            "YOUTUBE_TRANSCRIPT_DEPENDENCY_MISSING": (503, "YouTube transcript service unavailable"),
+            "TRANSCRIPT_FETCH_FAILED": (502, "YouTube transcript provider request failed"),
+        }.get(e.code, (400, "YouTube transcript unavailable or ingestion failed"))
         raise HTTPException(
-            status_code=504 if e.code == "TRANSCRIPT_TIMEOUT" else 400,
-            detail="YouTube transcript request timed out" if e.code == "TRANSCRIPT_TIMEOUT" else "YouTube transcript unavailable or ingestion failed",
+            status_code=error_status, detail=message,
+            headers={"Retry-After": "60"} if error_status == 503 else None,
         )
 
     except SQLAlchemyError:

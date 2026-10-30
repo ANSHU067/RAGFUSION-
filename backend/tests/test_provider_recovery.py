@@ -129,13 +129,13 @@ def test_wrapped_403_uses_fallback_with_same_deadline(monkeypatch):
     monkeypatch.setattr(youtube, "fetch_watch_page_captions", recover)
     deadline = time.monotonic() + 60
     assert youtube._fetch_transcript_sync(VIDEO, ["en"], deadline) == "Recovered captions"
-    assert recover.call_args.args[1:] == (VIDEO, ["en"], deadline)
+    assert recover.call_args.args == (VIDEO, ["en"], deadline)
     recover.assert_called_once()
 
 
 @pytest.mark.parametrize("status", [401, 429, 500])
-def test_other_http_failures_do_not_trigger_caption_fallback(status):
-    assert not fallback.is_http_403(blocked_error(status))
+def test_http_failures_trigger_caption_fallback(status):
+    assert fallback.should_use_caption_fallback(blocked_error(status))
 
 
 class BoundedResponse:
@@ -153,7 +153,8 @@ class BoundedResponse:
         if self.status_code >= 400:
             raise blocked_error(self.status_code)
 
-    def iter_content(self, chunk_size):
+    def iter_bytes(self):
+        chunk_size = 16 * 1024
         for start in range(0, len(self.body), chunk_size):
             yield self.body[start:start + chunk_size]
 
@@ -164,14 +165,15 @@ def test_watch_page_extraction_uses_json_parser_and_fixed_caption_origin():
          "languageCode": "en-IN", "kind": "asr"},
     ]}}}
     http = Mock()
-    http.get.side_effect = [
+    http.stream.side_effect = [
         BoundedResponse('<script>var ytInitialPlayerResponse = ' + json.dumps(player) + ';</script>'),
         BoundedResponse(json.dumps({"events": [{"segs": [{"utf8": "Hello"}, {"utf8": "world"}]}]})),
     ]
-    assert fallback.fetch_watch_page_captions(http, VIDEO, ["en"], time.monotonic() + 60) == "Hello world"
-    assert "fmt=json3" in http.get.call_args.args[0]
-    assert "fmt=srv3" not in http.get.call_args.args[0]
-    assert all(call.kwargs == {"stream": True, "allow_redirects": False} for call in http.get.call_args_list)
+    assert fallback._fetch_captions(http, VIDEO, ["en"], time.monotonic() + 60) == "Hello world"
+    assert "fmt=json3" in http.stream.call_args.args[1]
+    assert "fmt=srv3" not in http.stream.call_args.args[1]
+    assert all(call.kwargs["follow_redirects"] is False for call in http.stream.call_args_list)
+    assert all(call.kwargs["timeout"].read <= 20 for call in http.stream.call_args_list)
 
 
 @pytest.mark.parametrize("url", [
@@ -187,12 +189,12 @@ def test_caption_urls_cannot_escape_fixed_public_endpoint(url):
 def test_fallback_caps_body_and_refuses_redirects_or_expired_deadline(monkeypatch):
     http = Mock()
     monkeypatch.setattr(fallback, "MAX_RESPONSE_BYTES", 8)
-    http.get.return_value = BoundedResponse("x" * 9)
+    http.stream.return_value = BoundedResponse("x" * 9)
     with pytest.raises(RuntimeError, match="size limit"):
         fallback._read_response(http, "https://www.youtube.com/watch", time.monotonic() + 60)
-    http.get.return_value = BoundedResponse("", status=302)
+    http.stream.return_value = BoundedResponse("", status=302)
     with pytest.raises(RuntimeError, match="Unexpected"):
         fallback._read_response(http, "https://www.youtube.com/watch", time.monotonic() + 60)
     with pytest.raises(Timeout):
         fallback._read_response(http, "https://www.youtube.com/watch", 0)
-    assert http.get.call_count == 2
+    assert http.stream.call_count == 2

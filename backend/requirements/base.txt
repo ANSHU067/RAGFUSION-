@@ -39,6 +39,7 @@ trafilatura>=1.6,<2.0
 # YouTube source ingestion
 youtube-transcript-api>=1.0,<2.0
 requests>=2.32,<3.0
+httpx>=0.27,<1.0
 overrides>=7.0,<8.0
 
 # Lightweight ONNX embeddings; do not add integrations that pull in torch.

@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import anyio
+import httpx
 from requests import Session as HTTPSession
 from requests.exceptions import Timeout as HTTPTimeout
 from requests.exceptions import ReadTimeout, ConnectionError as HTTPConnectionError
@@ -29,7 +30,7 @@ from app.db.session import get_session_factory
 from app.models.entities import Embedding, SourceStatus, YouTubeSource
 from app.rag.retrievers.retriever_manager import RetrieverManager
 from app.services.embedding_helper import generate_embeddings
-from app.services.youtube_fallback import fetch_watch_page_captions, is_http_403
+from app.services.youtube_fallback import fetch_watch_page_captions, should_use_caption_fallback
 
 from app.core.worker_limits import INGEST_LIMITER, VECTOR_LIMITER
 
@@ -301,10 +302,21 @@ def _fetch_transcript_sync(video_id: str, languages: list[str], deadline: float)
                     manual = [item for item in available if not item.is_generated]
                     transcript = (manual or available)[0].fetch()
             except Exception as exc:
-                if not is_http_403(exc):
+                if not should_use_caption_fallback(exc):
                     raise
-                logger.info("YouTube player returned 403; trying public watch-page captions")
-                return clean_transcript_text(fetch_watch_page_captions(http, video_id, languages, deadline))
+                logger.info("YouTube API blocked or failed; trying public watch-page captions")
+                try:
+                    result = clean_transcript_text(fetch_watch_page_captions(video_id, languages, deadline))
+                    if not result:
+                        raise RuntimeError("Empty fallback captions")
+                    return result
+                except (httpx.TimeoutException, HTTPTimeout) as fallback_error:
+                    raise YouTubeIngestionError("YouTube transcript request timed out", code="TRANSCRIPT_TIMEOUT") from fallback_error
+                except Exception as fallback_error:
+                    logger.warning("YouTube caption fallback unavailable (%s)", type(fallback_error).__name__)
+                    raise YouTubeIngestionError(
+                        "YouTube transcript service unavailable", code="TRANSCRIPT_UPSTREAM_UNAVAILABLE",
+                    ) from fallback_error
             if time.monotonic() >= deadline:
                 raise HTTPTimeout("Transcript deadline exceeded")
             parts = [item.text if hasattr(item, "text") else item.get("text", "") for item in transcript]
